@@ -9,17 +9,21 @@ const pool = new Pool({
     port: process.env.DB_PORT || 5432,
 });
 
-// Test the connection
-pool.connect((err, client, done) => {
-    if (err) {
-        console.error('Error connecting to the database:', err);
-    } else {
+// Connect to the database
+const connect = async () => {
+    try {
+        const client = await pool.connect();
         console.log('Successfully connected to PostgreSQL database');
-        done();
+        client.release();
+        return true;
+    } catch (err) {
+        console.error('Error connecting to the database:', err);
+        throw err;
     }
-});
+};
 
 module.exports = {
     query: (text, params) => pool.query(text, params),
-    pool
+    pool,
+    connect
 };

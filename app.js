@@ -1,57 +1,47 @@
-// ℹ️ Gets access to environment variables/settings
-require("dotenv").config();
+// ℹ️ Core imports
+const express = require("express");                // Express framework
+const dotenv = require("dotenv");                 // Environment variables
+const hbs = require("hbs");                       // Handlebars view engine
 
-// ℹ️ Connects to the database
-const db = require("./db");
+// ℹ️ Core functionality imports
+const db = require("./db/index");                 // Database connection
+const config = require("./config/index");         // Application configuration
+const errorHandler = require("./error-handling/index");  // Error handling
 
-// Handles http requests (express is node js framework)
-const express = require("express");
+// Initialize environment variables
+dotenv.config();
 
-// Handles the handlebars
-const hbs = require("hbs");
-
-const logger = require("morgan");
-const path = require("path");
-const favicon = require("serve-favicon");
-
+// Create and configure Express application
 const app = express();
+config(app);
 
-// ℹ️ This function is getting exported from the config folder. It runs most pieces of middleware
-require("./config")(app);
-
-// 👇 Start handling routes here
-const indexRoutes = require("./routes/index.routes");
-app.use("/", indexRoutes);
-
+// ℹ️ Route imports
+const index = require("./routes/index.routes");
 const authRoutes = require("./routes/auth.routes");
-app.use("/api/auth", authRoutes);
+const userRoutes = require("./routes/user.routes");
+const employeeRoutes = require("./routes/employee.routes");
+const customerRoutes = require("./routes/customer.routes");
+const loanRoutes = require("./routes/loan.routes");
+const transactionRoutes = require("./routes/transaction.routes");
 
-const loanRoutes = require('./routes/loan.routes');
-app.use('/api/loans', loanRoutes);
+// ℹ️ Route setup
+app.use("/", index);
+app.use("/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/employees", employeeRoutes);
+app.use("/api/customers", customerRoutes);
+app.use("/api/loans", loanRoutes);
+app.use("/api/transactions", transactionRoutes);
 
-const userRoutes = require('./routes/user.routes');
-app.use('/api/users', userRoutes);
+// Database connection
+db.connect()
+    .then(() => console.log("Successfully connected to database"))
+    .catch(err => {
+        console.error("Failed to connect to database:", err);
+        process.exit(1);
+    });
 
-const employeeRoutes = require('./routes/employee.routes');
-app.use('/api/employees', employeeRoutes);
-
-const customerRoutes = require('./routes/customer.routes');
-app.use('/api/customers', customerRoutes);
-
-const transactionRoutes = require('./routes/transaction.routes');
-app.use('/api/transactions', transactionRoutes);
-
-// ❗ To handle errors. Routes that don't exist or errors that you handle in specific routes
-require("./error-handling")(app);
-
-// Test database connection
-db.pool.connect((err, client, done) => {
-  if (err) {
-    console.error('Error connecting to PostgreSQL:', err);
-  } else {
-    console.log('Successfully connected to PostgreSQL');
-    done();
-  }
-});
+// Error handling
+app.use(errorHandler);
 
 module.exports = app;

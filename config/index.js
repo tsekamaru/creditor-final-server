@@ -1,47 +1,23 @@
-// We reuse this import in order to have access to the `body` property in requests
-const express = require("express");
-
-// ℹ️ Responsible for the messages you see in the terminal as requests are coming in
-// https://www.npmjs.com/package/morgan
-const logger = require("morgan");
-
-// ℹ️ Needed when we deal with cookies (we will when dealing with authentication)
-// https://www.npmjs.com/package/cookie-parser
-const cookieParser = require("cookie-parser");
-
-// ℹ️ Serves a custom favicon on each request
-// https://www.npmjs.com/package/serve-favicon
-const favicon = require("serve-favicon");
-
-// ℹ️ global package used to `normalize` paths amongst different operating systems
-// https://www.npmjs.com/package/path
-const path = require("path");
-
-// ℹ️ Session middleware for authentication
-// https://www.npmjs.com/package/express-session
-const session = require("express-session");
+// ℹ️ Core middleware imports
+const express = require("express");                // Express framework
+const logger = require("morgan");                 // Request logging
+const cookieParser = require("cookie-parser");    // Cookie parsing
+const session = require("express-session");       // Session management
+const path = require("path");                     // Path utilities
 
 // Middleware configuration
 module.exports = (app) => {
-  // In development environment the app logs
+  // Development logging
   app.use(logger("dev"));
 
-  // To have access to `body` property in the request
+  // Request body parsing
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());
 
-  // Normalizes the path to the views folder
+  // View engine setup
   app.set("views", path.join(__dirname, "..", "views"));
-  // Sets the view engine to handlebars
   app.set("view engine", "hbs");
-  // Handles access to the public folder
-  app.use(express.static(path.join(__dirname, "..", "public")));
-
-  // Handles access to the favicon
-  app.use(
-    favicon(path.join(__dirname, "..", "public", "images", "favicon.ico"))
-  );
 
   // Session configuration
   app.use(
@@ -50,7 +26,10 @@ module.exports = (app) => {
       resave: false,
       saveUninitialized: false,
       cookie: {
-        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+        maxAge: 24 * 60 * 60 * 1000, // 24 hours
+        secure: process.env.NODE_ENV === 'production', // HTTPS in production
+        httpOnly: true, // Prevent client-side JS access
+        sameSite: 'strict' // CSRF protection
       }
     })
   );

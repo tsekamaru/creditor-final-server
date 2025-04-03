@@ -1,17 +1,30 @@
 module.exports = (app) => {
+  // Handle 404 errors
   app.use((req, res, next) => {
-    // this middleware runs whenever requested page is not available
-    res.status(404).render("not-found");
+    res.status(404).json({
+      error: 'Not Found',
+      message: 'The requested resource was not found',
+      path: req.path,
+      method: req.method
+    });
   });
 
+  // Handle all other errors
   app.use((err, req, res, next) => {
-    // whenever you call next(err), this middleware will handle the error
-    // always logs the error
+    // Log the error for debugging
     console.error("ERROR: ", req.method, req.path, err);
 
-    // only render if the error ocurred before sending the response
-    if (!res.headersSent) {
-      res.status(500).render("error");
-    }
+    // Determine the status code
+    const statusCode = err.status || 500;
+
+    // Send JSON response
+    res.status(statusCode).json({
+      error: err.name || 'Internal Server Error',
+      message: err.message || 'An unexpected error occurred',
+      path: req.path,
+      method: req.method,
+      // Only include stack trace in development
+      ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+    });
   });
 };

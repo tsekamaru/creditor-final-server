@@ -1,24 +1,93 @@
-<div id="form">
-  <h2>Sign Up</h2>
-  <form action="/auth/signup" method="POST">
+<div class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+  <div class="max-w-md w-full space-y-8">
+    <div>
+      <h2 class="mt-6 text-center text-3xl font-extrabold text-primary">
+        Create your account
+      </h2>
+      <p class="mt-2 text-center text-sm text-gray-600">
+        Step 1: Verify your phone number
+      </p>
+    </div>
+    <form class="mt-8 space-y-6" action="/auth/signup" method="POST">
+      <div class="rounded-md shadow-sm -space-y-px">
+        <!-- Phone Number -->
+        <div class="mb-4">
+          <label for="phone_number" class="block text-sm font-medium text-gray-700">Phone number</label>
+          <input id="phone_number" name="phone_number" type="tel" autocomplete="tel" required
+            class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
+            placeholder="Enter your phone number">
+        </div>
 
-    <label> Username
-      <input type="text" name="username" placeholder="Your username" />
-    </label>
+        <!-- OTP Verification -->
+        <div class="mb-4">
+          <label for="otp" class="block text-sm font-medium text-gray-700">Verification Code</label>
+          <div class="flex space-x-2">
+            <button type="button" onclick="requestOTP()"
+              class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-primary hover:bg-primary-dark focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
+              Send Code
+            </button>
+          </div>
+          <input id="otp" name="otp" type="text" autocomplete="off" required
+            class="mt-2 appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
+            placeholder="Enter verification code">
+        </div>
+      </div>
 
-    <label> Email
-      <input type="email" name="email" placeholder="Your email" />
-    </label>
+      <div>
+        <button type="submit"
+          class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-primary hover:bg-primary-dark focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary">
+          Verify Phone
+        </button>
+      </div>
 
-    <label> Password
-      <input type="password" name="password" placeholder="Your password" />
-    </label>
+      {{#if errorMessage}}
+        <div class="rounded-md bg-red-50 p-4">
+          <div class="flex">
+            <div class="ml-3">
+              <h3 class="text-sm font-medium text-red-800">{{errorMessage}}</h3>
+            </div>
+          </div>
+        </div>
+      {{/if}}
+    </form>
 
-    <button type="submit">Sign Up</button>
-
-
-    {{#if errorMessage}}
-      <p class="error">{{errorMessage}}</p>
-    {{/if}}
-  </form>
+    <div class="text-center">
+      <p class="text-sm text-gray-600">
+        Already have an account?
+        <a href="/auth/login" class="font-medium text-primary hover:text-primary-dark">
+          Sign in
+        </a>
+      </p>
+    </div>
+  </div>
 </div>
+
+<script>
+  function requestOTP() {
+    const phoneNumber = document.getElementById('phone_number').value;
+    if (!phoneNumber) {
+      alert('Please enter a phone number first');
+      return;
+    }
+    // Here you would make an API call to request OTP
+    fetch('/auth/request-otp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ phone: phoneNumber }),
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.success) {
+        alert('Verification code sent successfully!');
+      } else {
+        alert('Failed to send verification code: ' + data.message);
+      }
+    })
+    .catch(error => {
+      console.error('Error:', error);
+      alert('Failed to send verification code');
+    });
+  }
+</script>

@@ -1,103 +1,171 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/User.model');
+const db = require('../db');
+const bcrypt = require('bcrypt');
+const saltRounds = 10;
 
-// GET /users - Get all users (Admin only)
-router.get('/', async (req, res, next) => {
+// Middleware
+const isLoggedIn = require('../middleware/isLoggedIn');
+const isAdmin = require('../middleware/isAdmin');
+
+// GET /api/users - Get all users (Admin only)
+router.get('/', isLoggedIn, isAdmin, async (req, res, next) => {
     try {
-        // if (!req.user || req.user.role !== 'admin') {
-        //     return res.status(403).json({ 
-        //         message: 'Access denied. Only administrators can view all users.' 
-        //     });
-        // }
-
-        const users = await User.getAllUsers();
-        res.json(users);
+        const result = await db.query(
+            'SELECT id, role, phone_number, email, created_at, updated_at FROM users ORDER BY created_at DESC'
+        );
+        res.json(result.rows);
     } catch (error) {
         next(error);
     }
 });
 
-// GET /users/:id - Get single user
-router.get('/:id', async (req, res, next) => {
+// POST /api/users - Create new user (Admin only)
+router.post('/', isLoggedIn, isAdmin, async (req, res, next) => {
+    try {
+        const { role, phone_number, email, password } = req.body;
+
+        // Validation - email is optional
+        if (!role || !phone_number || !password) {
+            return res.status(400).json({
+                message: 'Role, phone number, and password are required.'
+            });
+        }
+
+        // Check if phone number already exists
+        const phoneCheck = await db.query(
+            'SELECT * FROM users WHERE phone_number = $1',
+            [phone_number]
+        );
+
+        if (phoneCheck.rows.length > 0) {
+            return res.status(400).json({
+                message: 'Phone number already exists.'
+            });
+        }
+
+        // If email is provided, check if it exists
+        if (email) {
+            const emailCheck = await db.query(
+                'SELECT * FROM users WHERE email = $1',
+                [email]
+            );
+
+            if (emailCheck.rows.length > 0) {
+                return res.status(400).json({
+                    message: 'Email already exists.'
+                });
+            }
+        }
+
+        // Hash password
+        const salt = await bcrypt.genSalt(saltRounds);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // Create user
+        const result = await db.query(
+            `INSERT INTO users 
+             (role, phone_number, email, password) 
+             VALUES ($1, $2, $3, $4) 
+             RETURNING id, role, phone_number, email, created_at, updated_at`,
+            [role, phone_number, email || null, hashedPassword]
+        );
+
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        next(error);
+    }
+});
+
+// GET /api/users/:id - Get single user
+router.get('/:id', isLoggedIn, async (req, res, next) => {
     try {
         // Users can only view their own profile unless they're admin
-        // if (!req.user || (req.user.id !== parseInt(req.params.id) && req.user.role !== 'admin')) {
-        //     return res.status(403).json({ 
-        //         message: 'Access denied. You can only view your own profile.' 
-        //     });
-        // }
+        if (req.user.id !== parseInt(req.params.id) && req.user.role !== 'admin') {
+            return res.status(403).json({ 
+                message: 'Access denied. You can only view your own profile.' 
+            });
+        }
 
-        const user = await User.getUserById(req.params.id);
-        if (!user) {
+        const result = await db.query(
+            'SELECT id, role, phone_number, email, created_at, updated_at FROM users WHERE id = $1',
+            [req.params.id]
+        );
+
+        if (result.rows.length === 0) {
             return res.status(404).json({ message: 'User not found' });
         }
-        res.json(user);
+
+        res.json(result.rows[0]);
     } catch (error) {
         next(error);
     }
 });
 
-// POST /users - Create new user
-router.post('/', async (req, res, next) => {
-    try {
-        const newUser = await User.createUser(req.body);
-        res.status(201).json(newUser);
-    } catch (error) {
-        next(error);
-    }
-});
-
-// PUT /users/:id - Update user
-router.put('/:id', async (req, res, next) => {
+// PUT /api/users/:id - Update user
+router.put('/:id', isLoggedIn, async (req, res, next) => {
     try {
         // Users can only update their own profile unless they're admin
-        // if (!req.user || (req.user.id !== parseInt(req.params.id) && req.user.role !== 'admin')) {
-        //     return res.status(403).json({ 
-        //         message: 'Access denied. You can only update your own profile.' 
-        //     });
-        // }
+        if (req.user.id !== parseInt(req.params.id) && req.user.role !== 'admin') {
+            return res.status(403).json({ 
+                message: 'Access denied. You can only update your own profile.' 
+            });
+        }
 
-        const updatedUser = await User.updateUser(req.params.id, req.body);
-        if (!updatedUser) {
+        const { phone_number, email } = req.body;
+        
+        // Basic validation - only phone number is required
+        if (!phone_number) {
+            return res.status(400).json({ 
+                message: 'Phone number is required.' 
+            });
+        }
+
+        // If email is provided, check if it exists for other users
+        if (email) {
+            const emailCheck = await db.query(
+                'SELECT * FROM users WHERE email = $1 AND id != $2',
+                [email, req.params.id]
+            );
+
+            if (emailCheck.rows.length > 0) {
+                return res.status(400).json({ 
+                    message: 'Email already exists for another user.' 
+                });
+            }
+        }
+
+        const result = await db.query(
+            `UPDATE users 
+             SET phone_number = $1, email = $2, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $3 
+             RETURNING id, role, phone_number, email, created_at, updated_at`,
+            [phone_number, email || null, req.params.id]
+        );
+
+        if (result.rows.length === 0) {
             return res.status(404).json({ message: 'User not found' });
         }
-        res.json(updatedUser);
+
+        res.json(result.rows[0]);
     } catch (error) {
         next(error);
     }
 });
 
-// DELETE /users/:id - Delete user (Admin only)
-router.delete('/:id', async (req, res, next) => {
+// DELETE /api/users/:id - Delete user (Admin only)
+router.delete('/:id', isLoggedIn, isAdmin, async (req, res, next) => {
     try {
-        // if (!req.user || req.user.role !== 'admin') {
-        //     return res.status(403).json({ 
-        //         message: 'Access denied. Only administrators can delete users.' 
-        //     });
-        // }
+        const result = await db.query(
+            'DELETE FROM users WHERE id = $1 RETURNING id, role, phone_number, email, created_at, updated_at',
+            [req.params.id]
+        );
 
-        const deletedUser = await User.deleteUser(req.params.id);
-        if (!deletedUser) {
+        if (result.rows.length === 0) {
             return res.status(404).json({ message: 'User not found' });
         }
-        res.json({ message: 'User deleted successfully', user: deletedUser });
-    } catch (error) {
-        next(error);
-    }
-});
 
-// POST /users/login - Authenticate user
-router.post('/login', async (req, res, next) => {
-    try {
-        const { phone_number, password } = req.body;
-        const user = await User.authenticateUser(phone_number, password);
-        
-        if (!user) {
-            return res.status(401).json({ message: 'Invalid phone number or password' });
-        }
-        
-        res.json(user);
+        res.json({ message: 'User deleted successfully', user: result.rows[0] });
     } catch (error) {
         next(error);
     }

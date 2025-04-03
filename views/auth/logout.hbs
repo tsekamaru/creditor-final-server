@@ -1,4 +1,24 @@
 {{!-- this file is only shown whenever there is an error during log out --}}
-{{#if errorMessage}}
-    {{errorMessage}}
-{{/if}}
+<div class="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+  <div class="max-w-md w-full space-y-8">
+    <div>
+      <h2 class="mt-6 text-center text-3xl font-extrabold text-primary">
+        Logout Error
+      </h2>
+    </div>
+    {{#if errorMessage}}
+      <div class="rounded-md bg-red-50 p-4">
+        <div class="flex">
+          <div class="ml-3">
+            <h3 class="text-sm font-medium text-red-800">{{errorMessage}}</h3>
+          </div>
+        </div>
+      </div>
+      <div class="text-center">
+        <a href="/" class="font-medium text-primary hover:text-primary-dark">
+          Return to Home
+        </a>
+      </div>
+    {{/if}}
+  </div>
+</div>
