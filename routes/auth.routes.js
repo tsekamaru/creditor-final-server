@@ -230,4 +230,14 @@ router.get("/logout", (req, res) => {
   }
 });
 
+// GET /auth/validate-token - Route to validate a JWT token
+router.get("/validate-token", verifyToken, (req, res) => {
+  // If verifyToken middleware passes, token is valid and user is available in req.user
+  res.json({
+    success: true,
+    message: "Token is valid",
+    user: req.user
+  });
+});
+
 module.exports = router;
