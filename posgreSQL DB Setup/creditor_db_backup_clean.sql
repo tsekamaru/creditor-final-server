@@ -1,0 +1,1957 @@
+--
+-- PostgreSQL database dump
+--
+
+-- Dumped from database version 17.4
+-- Dumped by pg_dump version 17.4
+
+-- Started on 2025-04-05 15:20:51
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- TOC entry 866 (class 1247 OID 16450)
+-- Name: employee_position; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.employee_position AS ENUM (
+    'teller',
+    'manager',
+    'director'
+);
+
+
+--
+-- TOC entry 875 (class 1247 OID 16508)
+-- Name: loan_status; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.loan_status AS ENUM (
+    'active',
+    'paid',
+    'defaulted'
+);
+
+
+--
+-- TOC entry 887 (class 1247 OID 16586)
+-- Name: transaction_direction; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.transaction_direction AS ENUM (
+    'in',
+    'out'
+);
+
+
+--
+-- TOC entry 884 (class 1247 OID 16579)
+-- Name: transaction_purpose; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.transaction_purpose AS ENUM (
+    'loan_principle_payment',
+    'loan_interest_payment',
+    'loan_give_out'
+);
+
+
+--
+-- TOC entry 860 (class 1247 OID 16386)
+-- Name: user_role; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.user_role AS ENUM (
+    'customer',
+    'employee',
+    'admin'
+);
+
+
+--
+-- TOC entry 229 (class 1255 OID 16470)
+-- Name: calculate_age(date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.calculate_age(birth_date date) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RETURN EXTRACT(YEAR FROM age(CURRENT_DATE, birth_date));
+END;
+$$;
+
+
+--
+-- TOC entry 230 (class 1255 OID 16515)
+-- Name: calculate_loan_dates(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.calculate_loan_dates() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- Calculate end_date
+    NEW.end_date := NEW.extension_date + NEW.loan_period + NEW.extension_days;
+    
+    -- Calculate default_date
+    NEW.default_date := NEW.extension_date + NEW.loan_period + NEW.extension_days + NEW.waiting_days;
+    
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- TOC entry 231 (class 1255 OID 16592)
+-- Name: derive_transaction_direction(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.derive_transaction_direction() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- Set transaction_direction based on transaction_purpose
+    NEW.transaction_direction := CASE 
+        WHEN NEW.transaction_purpose = 'loan_give_out' THEN 'out'::transaction_direction
+        WHEN NEW.transaction_purpose = 'loan_principle_payment' THEN 'in'::transaction_direction
+        WHEN NEW.transaction_purpose = 'loan_interest_payment' THEN 'in'::transaction_direction
+    END;
+    
+    IF NEW.transaction_direction IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'Invalid transaction purpose: ' || NEW.transaction_purpose;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- TOC entry 228 (class 1255 OID 16430)
+-- Name: update_updated_at_column(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- TOC entry 220 (class 1259 OID 16474)
+-- Name: customers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.customers (
+    user_id integer NOT NULL,
+    social_security_number character varying(11) NOT NULL,
+    first_name character varying(50) NOT NULL,
+    last_name character varying(50) NOT NULL,
+    date_of_birth date NOT NULL,
+    address character varying(400) NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT age_check CHECK ((public.calculate_age(date_of_birth) >= 18))
+);
+
+
+--
+-- TOC entry 222 (class 1259 OID 16549)
+-- Name: loans; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.loans (
+    id integer NOT NULL,
+    customer_id integer NOT NULL,
+    loan_period integer DEFAULT 30 NOT NULL,
+    extension_days integer DEFAULT 0 NOT NULL,
+    waiting_days integer DEFAULT 90 NOT NULL,
+    start_date date DEFAULT (CURRENT_TIMESTAMP)::date NOT NULL,
+    extension_date date DEFAULT (CURRENT_TIMESTAMP)::date NOT NULL,
+    end_date date NOT NULL,
+    default_date date NOT NULL,
+    interest_rate numeric(5,2) DEFAULT 4.50 NOT NULL,
+    overdue_rate numeric(5,2) DEFAULT 6.00 NOT NULL,
+    loan_amount numeric(12,2) NOT NULL,
+    paid_amount numeric(12,2) DEFAULT 0 NOT NULL,
+    paid_interest numeric(12,2) DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- TOC entry 223 (class 1259 OID 16573)
+-- Name: loan_details; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.loan_details AS
+ WITH base_calculations AS (
+         SELECT l.id,
+            l.customer_id,
+            l.loan_period,
+            l.extension_days,
+            l.waiting_days,
+            l.start_date,
+            l.extension_date,
+            l.end_date,
+            l.default_date,
+            l.interest_rate,
+            l.overdue_rate,
+            l.loan_amount,
+            l.paid_amount,
+            l.paid_interest,
+            l.created_at,
+            l.updated_at,
+            (ceil((GREATEST(0, (l.end_date - CURRENT_DATE)))::double precision))::integer AS remaining_days,
+            (ceil(((LEAST(CURRENT_DATE, l.end_date) - l.extension_date))::double precision))::integer AS interest_days,
+            (ceil((LEAST(GREATEST(0, (CURRENT_DATE - l.end_date)), l.waiting_days))::double precision))::integer AS overdue_days,
+            (l.loan_amount - l.paid_amount) AS principle_amount
+           FROM public.loans l
+        )
+ SELECT id,
+    customer_id,
+    loan_period,
+    extension_days,
+    waiting_days,
+    start_date,
+    extension_date,
+    end_date,
+    default_date,
+    interest_rate,
+    overdue_rate,
+    loan_amount,
+    paid_amount,
+    paid_interest,
+    created_at,
+    updated_at,
+    remaining_days,
+    interest_days,
+    overdue_days,
+    principle_amount,
+    round(((((principle_amount * (interest_days)::numeric) * interest_rate) / (30)::numeric) / (100)::numeric), 2) AS interest_amount,
+    round(((((principle_amount * (overdue_days)::numeric) * overdue_rate) / (30)::numeric) / (100)::numeric), 2) AS overdue_amount,
+    ((principle_amount + round(((((principle_amount * (interest_days)::numeric) * interest_rate) / (30)::numeric) / (100)::numeric), 2)) + round(((((principle_amount * (overdue_days)::numeric) * overdue_rate) / (30)::numeric) / (100)::numeric), 2)) AS total_amount,
+        CASE
+            WHEN (principle_amount <= (0)::numeric) THEN 'paid'::text
+            WHEN (CURRENT_DATE > default_date) THEN 'defaulted'::text
+            ELSE 'active'::text
+        END AS current_status
+   FROM base_calculations b;
+
+
+--
+-- TOC entry 227 (class 1259 OID 16658)
+-- Name: customer_details; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.customer_details AS
+ SELECT user_id,
+    social_security_number,
+    first_name,
+    last_name,
+    date_of_birth,
+    address,
+    public.calculate_age(date_of_birth) AS age,
+    created_at,
+    updated_at,
+    (EXISTS ( SELECT 1
+           FROM public.loan_details
+          WHERE ((loan_details.customer_id = c.user_id) AND (loan_details.current_status = 'active'::text)))) AS is_active
+   FROM public.customers c;
+
+
+--
+-- TOC entry 219 (class 1259 OID 16457)
+-- Name: employees; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.employees (
+    user_id integer NOT NULL,
+    "position" public.employee_position NOT NULL,
+    first_name character varying(50) NOT NULL,
+    last_name character varying(50) NOT NULL,
+    date_of_birth date NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- TOC entry 221 (class 1259 OID 16548)
+-- Name: loans_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.loans_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- TOC entry 5004 (class 0 OID 0)
+-- Dependencies: 221
+-- Name: loans_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.loans_id_seq OWNED BY public.loans.id;
+
+
+--
+-- TOC entry 225 (class 1259 OID 16628)
+-- Name: transactions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.transactions (
+    id integer NOT NULL,
+    transaction_amount numeric(12,2) NOT NULL,
+    transaction_purpose public.transaction_purpose NOT NULL,
+    loan_id integer NOT NULL,
+    employee_id integer,
+    customer_id integer NOT NULL,
+    transaction_direction public.transaction_direction NOT NULL,
+    principle_amount numeric(12,2) NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- TOC entry 226 (class 1259 OID 16653)
+-- Name: transaction_details; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.transaction_details AS
+ SELECT t.id,
+    t.transaction_amount,
+    t.transaction_purpose,
+    t.loan_id,
+    t.employee_id,
+    t.customer_id,
+    t.transaction_direction,
+    t.principle_amount,
+    t.created_at,
+    t.updated_at,
+    c.first_name AS customer_first_name,
+    c.last_name AS customer_last_name
+   FROM (public.transactions t
+     LEFT JOIN public.customers c ON ((t.customer_id = c.user_id)));
+
+
+--
+-- TOC entry 224 (class 1259 OID 16627)
+-- Name: transactions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.transactions_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- TOC entry 5005 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: transactions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.transactions_id_seq OWNED BY public.transactions.id;
+
+
+--
+-- TOC entry 218 (class 1259 OID 16432)
+-- Name: users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.users (
+    id integer NOT NULL,
+    role public.user_role NOT NULL,
+    phone_number character varying(20),
+    email character varying(255),
+    password_hash character varying(255),
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- TOC entry 217 (class 1259 OID 16431)
+-- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.users_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- TOC entry 5006 (class 0 OID 0)
+-- Dependencies: 217
+-- Name: users_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
+
+
+--
+-- TOC entry 4798 (class 2604 OID 16552)
+-- Name: loans id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loans ALTER COLUMN id SET DEFAULT nextval('public.loans_id_seq'::regclass);
+
+
+--
+-- TOC entry 4810 (class 2604 OID 16631)
+-- Name: transactions id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions ALTER COLUMN id SET DEFAULT nextval('public.transactions_id_seq'::regclass);
+
+
+--
+-- TOC entry 4791 (class 2604 OID 16435)
+-- Name: users id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- TOC entry 4994 (class 0 OID 16474)
+-- Dependencies: 220
+-- Data for Name: customers; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.customers (user_id, social_security_number, first_name, last_name, date_of_birth, address, created_at, updated_at) FROM stdin;
+1	450-51-3469	Frederique	Shervil	1997-03-07	1575 Tennyson Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+2	605-97-2656	Prudence	Stobbes	1983-04-02	9275 Stang Street	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+3	746-31-1214	Court	Kornyshev	1984-05-16	106 Shelley Terrace	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+4	581-28-3667	Margot	Cerro	1977-07-14	97 Lotheville Trail	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+5	199-94-5157	Uta	Tegler	1962-04-02	7 Lillian Drive	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+6	859-73-6964	Elmo	Ashworth	1961-05-21	78170 Everett Crossing	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+7	185-89-5432	Arvie	Schrieves	1967-07-15	88 Northport Pass	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+8	423-35-9942	Oriana	Magenny	1992-07-06	1844 Everett Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+9	820-38-5678	Jarred	Fairbanks	1973-10-03	17596 Dunning Terrace	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+10	234-92-1722	Thorsten	Dennett	1972-07-26	112 Wayridge Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+11	585-89-9167	Early	Forty	2003-08-18	28403 Chinook Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+12	172-56-9610	Mireille	Lomb	1974-05-15	409 Porter Street	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+13	610-49-2240	Lynsey	Senecaux	2002-08-19	27 Dorton Alley	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+14	555-33-7989	Westley	Grinyakin	1992-11-03	2347 Farwell Circle	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+15	329-90-1332	Nadeen	Shirtliff	1984-01-24	9 Porter Circle	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+16	667-76-3806	Cecil	Brunone	1980-02-01	7067 Hoepker Place	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+17	649-46-0674	Estell	Frostdicke	1991-06-24	488 La Follette Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+18	494-44-8705	Donnamarie	Tesche	2002-04-15	3741 Schlimgen Terrace	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+19	875-86-9174	Saw	Tizard	1985-08-29	686 Mayfield Trail	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+20	780-61-6445	Alessandro	Gregol	1963-11-15	10528 Lakewood Park	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+21	779-82-6303	Hedi	Wrettum	2000-12-27	5930 Union Place	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+22	112-71-2675	Aretha	Chesnay	1997-12-15	4 Meadow Vale Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+23	558-07-4981	Myles	Gilardone	1992-10-23	4483 Golf View Hill	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+24	404-82-9911	Rosene	Henrion	1966-07-27	7 Mallard Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+25	139-31-2374	Hendrick	Amys	1968-02-28	5 Lighthouse Bay Drive	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+26	111-90-4406	Tandie	Venneur	1963-03-15	302 Kim Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+27	535-79-5162	Faye	Rizzardo	1960-08-26	8579 Michigan Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+28	756-22-9354	Koenraad	Chrismas	1966-10-10	808 Jay Crossing	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+29	309-30-3500	Christiano	Learoid	1980-11-10	126 Lakeland Place	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+30	594-91-5483	Nickey	Derx	1994-02-22	027 Schlimgen Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+31	274-35-5167	Reynolds	Caldecutt	1996-05-25	7 Homewood Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+32	548-53-7866	Bert	Scrowson	1995-07-22	7 Vera Park	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+33	235-09-3687	Pattie	McSorley	2002-06-10	5659 Sachs Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+34	107-63-8928	Silva	Smythe	1987-10-15	15015 Westport Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+35	521-90-7934	Massimo	Smillie	1991-05-14	15 Ridgeway Circle	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+36	245-83-6208	Ferdinanda	Warrior	1976-07-02	49859 Vahlen Crossing	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+37	429-29-4686	Adrien	Chitson	1988-05-26	93070 Amoth Circle	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+38	828-90-2767	Tallie	Scargill	1985-02-03	7 Norway Maple Crossing	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+39	631-93-5845	Vassili	Barefoot	1966-02-25	077 Talmadge Hill	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+40	785-66-9499	Sholom	Rosedale	1961-09-02	4068 Schlimgen Park	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+41	244-21-6938	Gwynne	Oram	1972-11-25	14 Granby Street	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+42	673-95-1297	Aila	Freund	1993-09-08	878 Declaration Way	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+43	612-44-1043	Arel	Laba	1976-03-04	88 Roxbury Way	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+44	498-10-1290	Ammamaria	Gligori	1983-12-04	7 American Park	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+45	315-27-2789	Theo	Bickardike	1994-11-08	2 Lillian Alley	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+46	836-53-1191	Betsy	Muriel	1989-07-07	13 Prentice Trail	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+47	354-10-6705	Elisabeth	Doornbos	1990-03-29	486 Norway Maple Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+48	141-34-5564	Lucian	Haulkham	1970-04-22	06978 Blaine Drive	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+49	128-21-8399	Megen	Cardinal	1982-06-29	543 Homewood Center	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+50	387-90-8947	Lorrayne	Adamsen	1981-11-20	92906 Hooker Circle	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+51	304-34-0209	Sloane	Barbe	1973-10-09	28 Macpherson Street	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+52	502-84-5836	Martina	Lackney	1974-11-02	92 Carey Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+53	835-78-2387	Jordanna	Knobell	1968-03-01	8 Donald Center	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+54	773-72-3396	Nonnah	Haimes	1983-07-08	6 Waubesa Way	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+55	663-46-1886	Oralee	Tucknutt	1981-02-27	6193 Elmside Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+56	643-92-5171	Royce	Andrejs	1994-02-08	65 Knutson Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+57	582-67-5343	Sada	De Giovanni	2000-12-31	2261 Tony Hill	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+58	403-83-5711	Joellyn	Rivard	1967-12-21	3 Bartelt Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+59	656-23-0542	Stephani	Breming	1989-12-01	4 Darwin Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+60	520-07-4307	Sergei	Praton	1978-11-20	654 Crescent Oaks Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+61	121-04-9657	Arlena	Tromans	1974-07-16	6 Ryan Place	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+62	623-15-6918	Ciro	Zannotelli	1994-01-14	94064 Magdeline Hill	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+63	646-59-3466	Stephannie	Ferriere	1986-08-03	0604 Lakewood Gardens Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+64	848-95-6372	Jessalyn	Glyne	1976-09-09	937 Almo Pass	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+65	230-87-6097	Joletta	Gullivent	2000-06-15	43 Riverside Alley	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+66	309-60-1639	Peder	Noir	1998-02-18	654 Melby Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+67	227-58-5835	Ina	Blacklidge	1960-10-16	2 Jenifer Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+68	138-29-8404	Malorie	Godfree	1983-12-02	616 Susan Crossing	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+69	817-02-4545	Jillane	MacPaden	1969-07-13	49702 Barby Crossing	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+70	871-01-2322	Addi	Goodwins	1994-01-30	91805 Sunnyside Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+71	240-89-3147	Sol	Agius	1971-12-15	40211 Brickson Park Point	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+72	792-59-8677	Garv	Kettlewell	1964-02-22	3037 Bobwhite Street	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+73	687-43-7812	Correna	Eaklee	1980-08-05	37951 Manitowish Trail	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+74	425-99-5757	Magda	McQuilliam	1995-10-23	492 Clarendon Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+75	121-10-7851	Kamila	Ply	1995-04-21	74397 Londonderry Court	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+76	562-81-8802	Babara	Clac	2000-10-17	36 Duke Place	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+77	128-35-7893	Salomo	Balmforth	1963-07-15	1 Mallory Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+78	334-81-3851	Beryle	Pahler	1973-04-14	16731 Stuart Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+79	665-68-9726	Ileana	Adnett	1989-07-22	593 Lawn Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+80	253-48-6867	Desirae	Dryburgh	1975-08-04	032 Golf Course Circle	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+81	198-43-9770	Brianne	Habden	1997-02-18	8135 Bluejay Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+82	198-48-0967	Arnold	Torres	1984-04-21	92 Ridgeway Hill	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+83	878-76-5393	Briney	Boissieux	1979-11-07	11 Ramsey Terrace	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+84	770-39-0462	Peta	Bachmann	1973-07-23	98 Kedzie Park	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+85	216-64-6534	Zonda	Proschke	1980-02-04	337 Mayer Way	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+86	350-39-9056	Noella	McGrath	1991-02-05	6 Pine View Hill	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+87	845-64-5925	Mart	Gainor	1980-02-02	15612 Arapahoe Street	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+88	445-27-2073	Esra	Tivenan	1967-06-26	876 Gulseth Court	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+89	759-26-2235	Daveen	Disbrey	2000-02-20	7 Declaration Trail	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+90	638-10-8732	Benyamin	Knowller	1984-09-22	5724 East Park	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+91	191-77-7527	Filia	Millam	1995-07-24	346 Michigan Point	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+92	196-23-0129	Luciano	Setch	2000-02-22	34 Eastwood Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+93	110-57-7661	Ferris	Flann	1986-01-15	214 Westridge Avenue	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+94	354-23-4722	Annmaria	Capell	1979-02-08	6 Pankratz Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+95	345-10-3060	Kiley	Giametti	1987-03-06	15521 Green Ridge Road	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+96	248-09-9257	Tessie	Smails	1994-07-29	88 Blue Bill Park Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+97	250-82-2128	Gertrude	Tomaino	2003-02-22	10102 Bellgrove Plaza	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+98	445-43-7974	Fionna	Wisden	1986-06-23	7 Banding Way	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+99	269-99-4819	Fedora	Lahrs	1963-03-03	1 Wayridge Parkway	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+100	441-78-2660	Austin	Middlemiss	1989-03-10	4735 Manufacturers Lane	2025-03-29 14:57:43.32956+01	2025-03-29 14:57:43.32956+01
+117	123-45-6789	JohnJ	Doe	1990-05-15	123 Main Street, New York, NY 10001	2025-04-02 18:23:48.535793+02	2025-04-02 18:25:49.038943+02
+\.
+
+
+--
+-- TOC entry 4993 (class 0 OID 16457)
+-- Dependencies: 219
+-- Data for Name: employees; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.employees (user_id, "position", first_name, last_name, date_of_birth, created_at, updated_at) FROM stdin;
+101	director	Timothee	Copeman	1997-09-23	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+102	manager	Gabriela	O'Scanlon	1995-04-16	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+103	manager	Glennie	Maitland	1966-11-18	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+104	teller	Bentley	Whyffen	1992-04-03	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+105	teller	Florida	Aymes	2004-02-26	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+106	teller	Bendix	Reynalds	1993-11-07	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+107	teller	Patrizius	Vercruysse	1996-12-19	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+108	teller	Leonhard	Cowlin	1985-02-01	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+109	teller	Jane	Rosenfeld	1970-03-15	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+110	teller	Cordelie	Lope	1986-06-13	2025-03-29 11:26:50.387611+01	2025-03-29 11:26:50.387611+01
+113	teller	John	Doe	1990-05-15	2025-04-02 18:10:02.93638+02	2025-04-02 18:10:02.93638+02
+115	teller	Johnny	Doe	1990-05-15	2025-04-02 18:11:54.653436+02	2025-04-02 18:11:54.653436+02
+116	teller	Johnnys	Does	1990-05-15	2025-04-02 18:14:00.193868+02	2025-04-02 18:14:00.193868+02
+\.
+
+
+--
+-- TOC entry 4996 (class 0 OID 16549)
+-- Dependencies: 222
+-- Data for Name: loans; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.loans (id, customer_id, loan_period, extension_days, waiting_days, start_date, extension_date, end_date, default_date, interest_rate, overdue_rate, loan_amount, paid_amount, paid_interest, created_at, updated_at) FROM stdin;
+2	85	30	0	90	2024-11-04	2024-11-04	2024-12-04	2025-03-04	4.50	6.00	9762000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+4	67	30	0	90	2024-12-01	2024-12-01	2024-12-31	2025-03-31	4.50	6.00	1153000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+5	3	30	0	90	2024-07-28	2024-07-28	2024-08-27	2024-11-25	4.50	6.00	7827000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+6	53	30	0	90	2024-08-24	2024-08-24	2024-09-23	2024-12-22	4.50	6.00	2033000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+7	8	30	0	90	2024-04-03	2024-04-03	2024-05-03	2024-08-01	4.50	6.00	1601000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+11	84	30	0	90	2024-05-25	2024-05-25	2024-06-24	2024-09-22	4.50	6.00	3460000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+12	92	30	0	90	2024-09-10	2024-09-10	2024-10-10	2025-01-08	4.50	6.00	8994000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+13	16	30	0	90	2025-01-27	2025-01-27	2025-02-26	2025-05-27	4.50	6.00	5888000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+15	92	30	0	90	2025-03-14	2025-03-14	2025-04-13	2025-07-12	4.50	6.00	6204000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+16	33	30	0	90	2024-11-06	2024-11-06	2024-12-06	2025-03-06	4.50	6.00	8462000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+17	71	30	0	90	2024-11-06	2024-11-06	2024-12-06	2025-03-06	4.50	6.00	1832000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+18	31	30	0	90	2025-03-11	2025-03-11	2025-04-10	2025-07-09	4.50	6.00	3524000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+19	13	30	0	90	2025-02-14	2025-02-14	2025-03-16	2025-06-14	4.50	6.00	254000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+20	81	30	0	90	2024-04-20	2024-04-20	2024-05-20	2024-08-18	4.50	6.00	5199000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+21	12	30	0	90	2024-07-08	2024-07-08	2024-08-07	2024-11-05	4.50	6.00	3995000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+22	66	30	0	90	2024-06-19	2024-06-19	2024-07-19	2024-10-17	4.50	6.00	174000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+23	7	30	0	90	2024-08-13	2024-08-13	2024-09-12	2024-12-11	4.50	6.00	6581000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+24	34	30	0	90	2024-09-11	2024-09-11	2024-10-11	2025-01-09	4.50	6.00	8690000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+25	93	30	0	90	2024-05-20	2024-05-20	2024-06-19	2024-09-17	4.50	6.00	7431000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+26	12	30	0	90	2024-10-25	2024-10-25	2024-11-24	2025-02-22	4.50	6.00	7627000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+27	37	30	0	90	2024-10-05	2024-10-05	2024-11-04	2025-02-02	4.50	6.00	9251000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+28	36	30	0	90	2024-11-01	2024-11-01	2024-12-01	2025-03-01	4.50	6.00	1528000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+29	99	30	0	90	2024-05-28	2024-05-28	2024-06-27	2024-09-25	4.50	6.00	1681000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+30	69	30	0	90	2024-06-14	2024-06-14	2024-07-14	2024-10-12	4.50	6.00	8901000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+31	88	30	0	90	2024-06-05	2024-06-05	2024-07-05	2024-10-03	4.50	6.00	9335000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+32	73	30	0	90	2024-10-06	2024-10-06	2024-11-05	2025-02-03	4.50	6.00	7608000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+33	74	30	0	90	2025-03-16	2025-03-16	2025-04-15	2025-07-14	4.50	6.00	2430000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+34	20	30	0	90	2024-08-14	2024-08-14	2024-09-13	2024-12-12	4.50	6.00	5648000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+35	61	30	0	90	2024-10-21	2024-10-21	2024-11-20	2025-02-18	4.50	6.00	9526000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+36	55	30	0	90	2025-03-25	2025-03-25	2025-04-24	2025-07-23	4.50	6.00	6137000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+37	86	30	0	90	2024-10-27	2024-10-27	2024-11-26	2025-02-24	4.50	6.00	2927000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+38	53	30	0	90	2024-09-09	2024-09-09	2024-10-09	2025-01-07	4.50	6.00	5111000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+39	19	30	0	90	2025-03-18	2025-03-18	2025-04-17	2025-07-16	4.50	6.00	385000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+40	53	30	0	90	2025-02-23	2025-02-23	2025-03-25	2025-06-23	4.50	6.00	6613000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+41	31	30	0	90	2024-06-11	2024-06-11	2024-07-11	2024-10-09	4.50	6.00	3748000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+42	7	30	0	90	2024-05-17	2024-05-17	2024-06-16	2024-09-14	4.50	6.00	4865000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+43	56	30	0	90	2024-08-20	2024-08-20	2024-09-19	2024-12-18	4.50	6.00	6176000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+44	96	30	0	90	2024-10-30	2024-10-30	2024-11-29	2025-02-27	4.50	6.00	7106000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+45	61	30	0	90	2024-06-19	2024-06-19	2024-07-19	2024-10-17	4.50	6.00	5370000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+46	92	30	0	90	2024-06-17	2024-06-17	2024-07-17	2024-10-15	4.50	6.00	3876000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+47	58	30	0	90	2024-10-30	2024-10-30	2024-11-29	2025-02-27	4.50	6.00	3611000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+48	42	30	0	90	2024-06-10	2024-06-10	2024-07-10	2024-10-08	4.50	6.00	3355000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+49	16	30	0	90	2024-11-29	2024-11-29	2024-12-29	2025-03-29	4.50	6.00	2442000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+50	6	30	0	90	2024-08-28	2024-08-28	2024-09-27	2024-12-26	4.50	6.00	5974000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+51	31	30	0	90	2024-11-21	2024-11-21	2024-12-21	2025-03-21	4.50	6.00	7762000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+52	17	30	0	90	2024-04-19	2024-04-19	2024-05-19	2024-08-17	4.50	6.00	7456000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+53	68	30	0	90	2024-07-16	2024-07-16	2024-08-15	2024-11-13	4.50	6.00	4563000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+54	46	30	0	90	2024-11-26	2024-11-26	2024-12-26	2025-03-26	4.50	6.00	87000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+55	29	30	0	90	2024-10-29	2024-10-29	2024-11-28	2025-02-26	4.50	6.00	6310000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+56	93	30	0	90	2024-07-28	2024-07-28	2024-08-27	2024-11-25	4.50	6.00	8732000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+57	22	30	0	90	2024-11-04	2024-11-04	2024-12-04	2025-03-04	4.50	6.00	7093000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+58	81	30	0	90	2024-11-26	2024-11-26	2024-12-26	2025-03-26	4.50	6.00	1795000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+59	87	30	0	90	2025-02-07	2025-02-07	2025-03-09	2025-06-07	4.50	6.00	2847000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+60	7	30	0	90	2024-08-29	2024-08-29	2024-09-28	2024-12-27	4.50	6.00	4123000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+61	68	30	0	90	2024-04-11	2024-04-11	2024-05-11	2024-08-09	4.50	6.00	6222000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+62	66	30	0	90	2024-05-31	2024-05-31	2024-06-30	2024-09-28	4.50	6.00	6033000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+63	3	30	0	90	2025-01-03	2025-01-03	2025-02-02	2025-05-03	4.50	6.00	9076000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+64	98	30	0	90	2025-03-07	2025-03-07	2025-04-06	2025-07-05	4.50	6.00	3284000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+65	14	30	0	90	2024-04-22	2024-04-22	2024-05-22	2024-08-20	4.50	6.00	7670000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+66	53	30	0	90	2024-10-22	2024-10-22	2024-11-21	2025-02-19	4.50	6.00	200000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+67	17	30	0	90	2025-01-07	2025-01-07	2025-02-06	2025-05-07	4.50	6.00	1088000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+68	27	30	0	90	2024-09-23	2024-09-23	2024-10-23	2025-01-21	4.50	6.00	8368000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+69	44	30	0	90	2024-09-28	2024-09-28	2024-10-28	2025-01-26	4.50	6.00	4472000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+70	55	30	0	90	2024-05-23	2024-05-23	2024-06-22	2024-09-20	4.50	6.00	6038000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+71	85	30	0	90	2025-02-22	2025-02-22	2025-03-24	2025-06-22	4.50	6.00	3341000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+72	12	30	0	90	2024-07-29	2024-07-29	2024-08-28	2024-11-26	4.50	6.00	3236000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+73	38	30	0	90	2024-08-02	2024-08-02	2024-09-01	2024-11-30	4.50	6.00	7862000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+74	95	30	0	90	2024-07-20	2024-07-20	2024-08-19	2024-11-17	4.50	6.00	1543000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+75	88	30	0	90	2025-02-12	2025-02-12	2025-03-14	2025-06-12	4.50	6.00	9287000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+3	83	30	0	90	2024-12-11	2024-12-11	2025-01-10	2025-04-10	4.50	6.00	6368000.00	0.01	0.00	2025-03-30 15:05:06.82099+02	2025-04-01 21:28:54.560096+02
+8	7	30	0	90	2025-02-10	2025-02-10	2025-03-12	2025-06-10	4.50	6.00	7163000.00	7163000.00	32233500.00	2025-03-30 15:05:06.82099+02	2025-04-01 21:36:32.329109+02
+9	24	30	0	90	2025-03-17	2025-03-17	2025-04-16	2025-07-15	4.50	6.00	2196000.00	2196000.00	52704.00	2025-03-30 15:05:06.82099+02	2025-04-02 15:49:51.983261+02
+10	91	30	0	90	2025-02-13	2025-02-13	2025-03-15	2025-06-13	4.50	6.00	2826000.00	1826000.00	127170.00	2025-03-30 15:05:06.82099+02	2025-04-02 16:01:41.460797+02
+14	33	30	0	90	2025-03-15	2025-04-02	2025-05-02	2025-07-31	4.50	6.00	8162000.00	16324000.00	220374.00	2025-03-30 15:05:06.82099+02	2025-04-02 16:07:36.550128+02
+76	64	30	0	90	2024-10-27	2024-10-27	2024-11-26	2025-02-24	4.50	6.00	815000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+77	58	30	0	90	2024-09-03	2024-09-03	2024-10-03	2025-01-01	4.50	6.00	8309000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+78	74	30	0	90	2024-11-29	2024-11-29	2024-12-29	2025-03-29	4.50	6.00	2491000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+79	37	30	0	90	2024-11-21	2024-11-21	2024-12-21	2025-03-21	4.50	6.00	809000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+80	10	30	0	90	2025-02-07	2025-02-07	2025-03-09	2025-06-07	4.50	6.00	4531000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+81	68	30	0	90	2025-01-19	2025-01-19	2025-02-18	2025-05-19	4.50	6.00	5578000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+82	45	30	0	90	2024-05-10	2024-05-10	2024-06-09	2024-09-07	4.50	6.00	2047000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+83	80	30	0	90	2024-11-18	2024-11-18	2024-12-18	2025-03-18	4.50	6.00	8706000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+84	43	30	0	90	2024-12-10	2024-12-10	2025-01-09	2025-04-09	4.50	6.00	7258000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+85	35	30	0	90	2024-07-28	2024-07-28	2024-08-27	2024-11-25	4.50	6.00	5046000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+86	96	30	0	90	2024-03-30	2024-03-30	2024-04-29	2024-07-28	4.50	6.00	2794000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+87	68	30	0	90	2025-02-21	2025-02-21	2025-03-23	2025-06-21	4.50	6.00	3315000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+88	39	30	0	90	2024-11-25	2024-11-25	2024-12-25	2025-03-25	4.50	6.00	9101000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+89	6	30	0	90	2025-02-07	2025-02-07	2025-03-09	2025-06-07	4.50	6.00	8589000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+90	5	30	0	90	2024-05-27	2024-05-27	2024-06-26	2024-09-24	4.50	6.00	4441000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+91	76	30	0	90	2024-12-08	2024-12-08	2025-01-07	2025-04-07	4.50	6.00	9648000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+92	36	30	0	90	2024-06-03	2024-06-03	2024-07-03	2024-10-01	4.50	6.00	7624000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+93	61	30	0	90	2024-12-10	2024-12-10	2025-01-09	2025-04-09	4.50	6.00	9602000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+94	72	30	0	90	2025-02-06	2025-02-06	2025-03-08	2025-06-06	4.50	6.00	9879000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+95	72	30	0	90	2025-01-05	2025-01-05	2025-02-04	2025-05-05	4.50	6.00	3751000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+96	54	30	0	90	2024-06-09	2024-06-09	2024-07-09	2024-10-07	4.50	6.00	8446000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+97	23	30	0	90	2024-09-18	2024-09-18	2024-10-18	2025-01-16	4.50	6.00	2169000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+98	45	30	0	90	2024-06-17	2024-06-17	2024-07-17	2024-10-15	4.50	6.00	5510000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+99	67	30	0	90	2024-04-15	2024-04-15	2024-05-15	2024-08-13	4.50	6.00	7186000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+100	49	30	0	90	2024-08-13	2024-08-13	2024-09-12	2024-12-11	4.50	6.00	525000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+101	21	30	0	90	2024-07-13	2024-07-13	2024-08-12	2024-11-10	4.50	6.00	6901000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+102	76	30	0	90	2024-10-20	2024-10-20	2024-11-19	2025-02-17	4.50	6.00	763000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+103	22	30	0	90	2025-01-11	2025-01-11	2025-02-10	2025-05-11	4.50	6.00	7006000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+104	22	30	0	90	2024-10-13	2024-10-13	2024-11-12	2025-02-10	4.50	6.00	160000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+105	30	30	0	90	2024-06-14	2024-06-14	2024-07-14	2024-10-12	4.50	6.00	344000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+106	56	30	0	90	2024-11-13	2024-11-13	2024-12-13	2025-03-13	4.50	6.00	6294000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+107	92	30	0	90	2024-08-30	2024-08-30	2024-09-29	2024-12-28	4.50	6.00	6720000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+108	96	30	0	90	2024-06-05	2024-06-05	2024-07-05	2024-10-03	4.50	6.00	5149000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+109	7	30	0	90	2024-03-31	2024-03-31	2024-04-30	2024-07-29	4.50	6.00	2000000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+110	63	30	0	90	2024-04-04	2024-04-04	2024-05-04	2024-08-02	4.50	6.00	32000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+111	53	30	0	90	2025-02-11	2025-02-11	2025-03-13	2025-06-11	4.50	6.00	6032000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+112	72	30	0	90	2024-11-09	2024-11-09	2024-12-09	2025-03-09	4.50	6.00	8628000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+113	25	30	0	90	2025-02-14	2025-02-14	2025-03-16	2025-06-14	4.50	6.00	8800000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+114	49	30	0	90	2025-02-09	2025-02-09	2025-03-11	2025-06-09	4.50	6.00	1038000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+115	44	30	0	90	2024-09-05	2024-09-05	2024-10-05	2025-01-03	4.50	6.00	1254000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+116	55	30	0	90	2024-10-11	2024-10-11	2024-11-10	2025-02-08	4.50	6.00	1149000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+117	7	30	0	90	2025-03-22	2025-03-22	2025-04-21	2025-07-20	4.50	6.00	5459000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+118	3	30	0	90	2024-06-21	2024-06-21	2024-07-21	2024-10-19	4.50	6.00	3018000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+119	30	30	0	90	2024-08-07	2024-08-07	2024-09-06	2024-12-05	4.50	6.00	7561000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+120	29	30	0	90	2024-07-16	2024-07-16	2024-08-15	2024-11-13	4.50	6.00	2435000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+121	34	30	0	90	2024-06-13	2024-06-13	2024-07-13	2024-10-11	4.50	6.00	2408000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+122	14	30	0	90	2024-04-18	2024-04-18	2024-05-18	2024-08-16	4.50	6.00	7453000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+123	38	30	0	90	2024-08-31	2024-08-31	2024-09-30	2024-12-29	4.50	6.00	5989000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+124	15	30	0	90	2025-01-19	2025-01-19	2025-02-18	2025-05-19	4.50	6.00	666000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+125	69	30	0	90	2024-03-29	2024-03-29	2024-04-28	2024-07-27	4.50	6.00	1536000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+126	96	30	0	90	2024-11-23	2024-11-23	2024-12-23	2025-03-23	4.50	6.00	6891000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+127	49	30	0	90	2024-09-24	2024-09-24	2024-10-24	2025-01-22	4.50	6.00	9031000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+128	84	30	0	90	2024-12-24	2024-12-24	2025-01-23	2025-04-23	4.50	6.00	7311000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+129	58	30	0	90	2024-10-29	2024-10-29	2024-11-28	2025-02-26	4.50	6.00	2339000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+130	32	30	0	90	2024-07-30	2024-07-30	2024-08-29	2024-11-27	4.50	6.00	6528000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+131	55	30	0	90	2024-06-28	2024-06-28	2024-07-28	2024-10-26	4.50	6.00	1778000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+132	9	30	0	90	2024-04-28	2024-04-28	2024-05-28	2024-08-26	4.50	6.00	2364000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+133	57	30	0	90	2024-08-27	2024-08-27	2024-09-26	2024-12-25	4.50	6.00	4842000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+134	72	30	0	90	2024-12-16	2024-12-16	2025-01-15	2025-04-15	4.50	6.00	7704000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+135	93	30	0	90	2024-07-23	2024-07-23	2024-08-22	2024-11-20	4.50	6.00	5087000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+136	37	30	0	90	2025-02-12	2025-02-12	2025-03-14	2025-06-12	4.50	6.00	3212000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+137	5	30	0	90	2025-01-22	2025-01-22	2025-02-21	2025-05-22	4.50	6.00	4962000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+138	30	30	0	90	2025-03-04	2025-03-04	2025-04-03	2025-07-02	4.50	6.00	6550000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+139	35	30	0	90	2024-05-28	2024-05-28	2024-06-27	2024-09-25	4.50	6.00	8926000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+140	17	30	0	90	2024-08-02	2024-08-02	2024-09-01	2024-11-30	4.50	6.00	4582000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+141	91	30	0	90	2024-10-17	2024-10-17	2024-11-16	2025-02-14	4.50	6.00	366000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+142	51	30	0	90	2024-11-15	2024-11-15	2024-12-15	2025-03-15	4.50	6.00	6355000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+143	30	30	0	90	2024-12-26	2024-12-26	2025-01-25	2025-04-25	4.50	6.00	987000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+144	58	30	0	90	2024-09-23	2024-09-23	2024-10-23	2025-01-21	4.50	6.00	3859000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+145	91	30	0	90	2024-09-07	2024-09-07	2024-10-07	2025-01-05	4.50	6.00	5463000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+146	93	30	0	90	2025-01-01	2025-01-01	2025-01-31	2025-05-01	4.50	6.00	2752000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+147	68	30	0	90	2025-02-15	2025-02-15	2025-03-17	2025-06-15	4.50	6.00	845000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+148	73	30	0	90	2024-07-25	2024-07-25	2024-08-24	2024-11-22	4.50	6.00	8662000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+149	3	30	0	90	2024-11-25	2024-11-25	2024-12-25	2025-03-25	4.50	6.00	7457000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+150	38	30	0	90	2024-10-25	2024-10-25	2024-11-24	2025-02-22	4.50	6.00	3145000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+151	30	30	0	90	2024-09-27	2024-09-27	2024-10-27	2025-01-25	4.50	6.00	6777000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+152	25	30	0	90	2024-08-30	2024-08-30	2024-09-29	2024-12-28	4.50	6.00	9222000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+153	86	30	0	90	2024-04-02	2024-04-02	2024-05-02	2024-07-31	4.50	6.00	2567000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+154	54	30	0	90	2024-07-11	2024-07-11	2024-08-10	2024-11-08	4.50	6.00	3543000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+155	28	30	0	90	2024-10-16	2024-10-16	2024-11-15	2025-02-13	4.50	6.00	9352000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+156	63	30	0	90	2024-10-23	2024-10-23	2024-11-22	2025-02-20	4.50	6.00	5473000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+157	91	30	0	90	2024-09-02	2024-09-02	2024-10-02	2024-12-31	4.50	6.00	9747000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+158	42	30	0	90	2025-01-10	2025-01-10	2025-02-09	2025-05-10	4.50	6.00	3556000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+159	76	30	0	90	2025-01-08	2025-01-08	2025-02-07	2025-05-08	4.50	6.00	5581000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+160	51	30	0	90	2024-10-27	2024-10-27	2024-11-26	2025-02-24	4.50	6.00	1435000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+161	65	30	0	90	2025-01-30	2025-01-30	2025-03-01	2025-05-30	4.50	6.00	5472000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+162	15	30	0	90	2025-03-06	2025-03-06	2025-04-05	2025-07-04	4.50	6.00	4178000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+163	55	30	0	90	2024-05-02	2024-05-02	2024-06-01	2024-08-30	4.50	6.00	8451000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+164	29	30	0	90	2024-04-09	2024-04-09	2024-05-09	2024-08-07	4.50	6.00	1778000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+165	47	30	0	90	2024-08-15	2024-08-15	2024-09-14	2024-12-13	4.50	6.00	1549000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+166	1	30	0	90	2024-10-02	2024-10-02	2024-11-01	2025-01-30	4.50	6.00	4042000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+167	83	30	0	90	2024-06-15	2024-06-15	2024-07-15	2024-10-13	4.50	6.00	6777000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+168	52	30	0	90	2024-04-07	2024-04-07	2024-05-07	2024-08-05	4.50	6.00	1871000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+169	63	30	0	90	2024-07-16	2024-07-16	2024-08-15	2024-11-13	4.50	6.00	2022000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+170	63	30	0	90	2024-12-05	2024-12-05	2025-01-04	2025-04-04	4.50	6.00	6305000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+171	96	30	0	90	2025-02-19	2025-02-19	2025-03-21	2025-06-19	4.50	6.00	2796000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+172	23	30	0	90	2024-04-21	2024-04-21	2024-05-21	2024-08-19	4.50	6.00	2375000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+173	47	30	0	90	2025-01-09	2025-01-09	2025-02-08	2025-05-09	4.50	6.00	4688000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+174	74	30	0	90	2024-06-25	2024-06-25	2024-07-25	2024-10-23	4.50	6.00	8875000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+175	48	30	0	90	2024-07-03	2024-07-03	2024-08-02	2024-10-31	4.50	6.00	4857000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+176	70	30	0	90	2024-06-23	2024-06-23	2024-07-23	2024-10-21	4.50	6.00	2587000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+177	97	30	0	90	2025-01-05	2025-01-05	2025-02-04	2025-05-05	4.50	6.00	8381000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+178	56	30	0	90	2024-09-20	2024-09-20	2024-10-20	2025-01-18	4.50	6.00	2971000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+179	94	30	0	90	2024-09-03	2024-09-03	2024-10-03	2025-01-01	4.50	6.00	1938000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+180	70	30	0	90	2025-02-14	2025-02-14	2025-03-16	2025-06-14	4.50	6.00	3929000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+181	96	30	0	90	2024-06-08	2024-06-08	2024-07-08	2024-10-06	4.50	6.00	2671000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+182	91	30	0	90	2024-04-22	2024-04-22	2024-05-22	2024-08-20	4.50	6.00	8479000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+183	80	30	0	90	2024-05-31	2024-05-31	2024-06-30	2024-09-28	4.50	6.00	5904000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+184	41	30	0	90	2024-05-11	2024-05-11	2024-06-10	2024-09-08	4.50	6.00	6514000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+185	34	30	0	90	2024-04-28	2024-04-28	2024-05-28	2024-08-26	4.50	6.00	498000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+186	37	30	0	90	2024-11-27	2024-11-27	2024-12-27	2025-03-27	4.50	6.00	8350000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+187	96	30	0	90	2025-02-23	2025-02-23	2025-03-25	2025-06-23	4.50	6.00	3935000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+188	6	30	0	90	2024-04-28	2024-04-28	2024-05-28	2024-08-26	4.50	6.00	4402000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+189	97	30	0	90	2024-04-08	2024-04-08	2024-05-08	2024-08-06	4.50	6.00	5600000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+190	23	30	0	90	2024-06-29	2024-06-29	2024-07-29	2024-10-27	4.50	6.00	324000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+191	17	30	0	90	2024-09-03	2024-09-03	2024-10-03	2025-01-01	4.50	6.00	7454000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+192	34	30	0	90	2024-12-14	2024-12-14	2025-01-13	2025-04-13	4.50	6.00	4280000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+193	31	30	0	90	2025-02-25	2025-02-25	2025-03-27	2025-06-25	4.50	6.00	3365000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+194	46	30	0	90	2025-01-07	2025-01-07	2025-02-06	2025-05-07	4.50	6.00	5819000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+195	12	30	0	90	2024-12-07	2024-12-07	2025-01-06	2025-04-06	4.50	6.00	222000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+196	74	30	0	90	2024-05-17	2024-05-17	2024-06-16	2024-09-14	4.50	6.00	1409000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+197	95	30	0	90	2024-08-04	2024-08-04	2024-09-03	2024-12-02	4.50	6.00	3796000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+198	8	30	0	90	2024-04-29	2024-04-29	2024-05-29	2024-08-27	4.50	6.00	6188000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+199	82	30	0	90	2025-02-27	2025-02-27	2025-03-29	2025-06-27	4.50	6.00	5043000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+200	77	30	0	90	2025-02-01	2025-02-01	2025-03-03	2025-06-01	4.50	6.00	1821000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+201	40	30	0	90	2025-03-04	2025-03-04	2025-04-03	2025-07-02	4.50	6.00	8842000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+202	49	30	0	90	2024-08-10	2024-08-10	2024-09-09	2024-12-08	4.50	6.00	5161000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+203	85	30	0	90	2025-02-26	2025-02-26	2025-03-28	2025-06-26	4.50	6.00	5004000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+204	88	30	0	90	2024-09-30	2024-09-30	2024-10-30	2025-01-28	4.50	6.00	4257000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+205	6	30	0	90	2024-08-14	2024-08-14	2024-09-13	2024-12-12	4.50	6.00	3930000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+206	34	30	0	90	2024-11-02	2024-11-02	2024-12-02	2025-03-02	4.50	6.00	2709000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+207	76	30	0	90	2025-01-15	2025-01-15	2025-02-14	2025-05-15	4.50	6.00	5032000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+208	23	30	0	90	2024-08-03	2024-08-03	2024-09-02	2024-12-01	4.50	6.00	8181000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+209	45	30	0	90	2024-06-14	2024-06-14	2024-07-14	2024-10-12	4.50	6.00	3287000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+210	40	30	0	90	2024-04-09	2024-04-09	2024-05-09	2024-08-07	4.50	6.00	6839000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+211	68	30	0	90	2024-05-01	2024-05-01	2024-05-31	2024-08-29	4.50	6.00	9374000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+212	50	30	0	90	2025-03-12	2025-03-12	2025-04-11	2025-07-10	4.50	6.00	3178000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+213	74	30	0	90	2024-11-08	2024-11-08	2024-12-08	2025-03-08	4.50	6.00	7458000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+214	76	30	0	90	2025-01-17	2025-01-17	2025-02-16	2025-05-17	4.50	6.00	2100000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+215	37	30	0	90	2024-04-26	2024-04-26	2024-05-26	2024-08-24	4.50	6.00	1110000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+216	75	30	0	90	2024-05-15	2024-05-15	2024-06-14	2024-09-12	4.50	6.00	121000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+217	8	30	0	90	2024-12-19	2024-12-19	2025-01-18	2025-04-18	4.50	6.00	4617000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+218	10	30	0	90	2024-09-30	2024-09-30	2024-10-30	2025-01-28	4.50	6.00	2751000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+219	76	30	0	90	2024-09-27	2024-09-27	2024-10-27	2025-01-25	4.50	6.00	7184000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+220	21	30	0	90	2024-10-08	2024-10-08	2024-11-07	2025-02-05	4.50	6.00	5587000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+221	28	30	0	90	2024-12-27	2024-12-27	2025-01-26	2025-04-26	4.50	6.00	984000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+222	65	30	0	90	2024-04-01	2024-04-01	2024-05-01	2024-07-30	4.50	6.00	8299000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+223	34	30	0	90	2024-05-12	2024-05-12	2024-06-11	2024-09-09	4.50	6.00	2140000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+224	5	30	0	90	2025-02-25	2025-02-25	2025-03-27	2025-06-25	4.50	6.00	6757000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+225	68	30	0	90	2024-04-18	2024-04-18	2024-05-18	2024-08-16	4.50	6.00	9748000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+226	54	30	0	90	2025-01-06	2025-01-06	2025-02-05	2025-05-06	4.50	6.00	4717000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+227	55	30	0	90	2024-05-10	2024-05-10	2024-06-09	2024-09-07	4.50	6.00	4195000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+228	82	30	0	90	2024-11-09	2024-11-09	2024-12-09	2025-03-09	4.50	6.00	9696000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+229	86	30	0	90	2024-10-30	2024-10-30	2024-11-29	2025-02-27	4.50	6.00	4351000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+230	46	30	0	90	2025-02-26	2025-02-26	2025-03-28	2025-06-26	4.50	6.00	1702000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+231	58	30	0	90	2024-06-18	2024-06-18	2024-07-18	2024-10-16	4.50	6.00	3174000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+232	3	30	0	90	2024-04-01	2024-04-01	2024-05-01	2024-07-30	4.50	6.00	467000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+233	28	30	0	90	2025-01-06	2025-01-06	2025-02-05	2025-05-06	4.50	6.00	1531000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+234	42	30	0	90	2024-11-03	2024-11-03	2024-12-03	2025-03-03	4.50	6.00	796000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+235	23	30	0	90	2024-08-11	2024-08-11	2024-09-10	2024-12-09	4.50	6.00	6481000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+236	95	30	0	90	2025-01-25	2025-01-25	2025-02-24	2025-05-25	4.50	6.00	9629000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+237	25	30	0	90	2024-10-09	2024-10-09	2024-11-08	2025-02-06	4.50	6.00	4132000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+238	86	30	0	90	2025-03-20	2025-03-20	2025-04-19	2025-07-18	4.50	6.00	3237000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+239	18	30	0	90	2024-08-16	2024-08-16	2024-09-15	2024-12-14	4.50	6.00	1597000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+240	36	30	0	90	2024-06-07	2024-06-07	2024-07-07	2024-10-05	4.50	6.00	2302000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+241	7	30	0	90	2025-03-16	2025-03-16	2025-04-15	2025-07-14	4.50	6.00	7823000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+242	34	30	0	90	2024-07-20	2024-07-20	2024-08-19	2024-11-17	4.50	6.00	8173000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+243	80	30	0	90	2024-11-06	2024-11-06	2024-12-06	2025-03-06	4.50	6.00	7421000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+244	61	30	0	90	2024-08-02	2024-08-02	2024-09-01	2024-11-30	4.50	6.00	7703000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+245	48	30	0	90	2024-10-24	2024-10-24	2024-11-23	2025-02-21	4.50	6.00	4331000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+246	68	30	0	90	2024-07-17	2024-07-17	2024-08-16	2024-11-14	4.50	6.00	4708000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+247	44	30	0	90	2024-11-25	2024-11-25	2024-12-25	2025-03-25	4.50	6.00	3675000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+248	26	30	0	90	2024-10-04	2024-10-04	2024-11-03	2025-02-01	4.50	6.00	2401000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+249	83	30	0	90	2024-07-11	2024-07-11	2024-08-10	2024-11-08	4.50	6.00	9661000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+250	14	30	0	90	2024-12-21	2024-12-21	2025-01-20	2025-04-20	4.50	6.00	9061000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+251	62	30	0	90	2024-07-24	2024-07-24	2024-08-23	2024-11-21	4.50	6.00	7394000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+252	10	30	0	90	2024-09-24	2024-09-24	2024-10-24	2025-01-22	4.50	6.00	864000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+253	91	30	0	90	2025-02-27	2025-02-27	2025-03-29	2025-06-27	4.50	6.00	3936000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+254	98	30	0	90	2024-07-22	2024-07-22	2024-08-21	2024-11-19	4.50	6.00	5654000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+255	73	30	0	90	2024-04-28	2024-04-28	2024-05-28	2024-08-26	4.50	6.00	8596000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+256	98	30	0	90	2025-01-29	2025-01-29	2025-02-28	2025-05-29	4.50	6.00	4615000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+257	21	30	0	90	2024-11-26	2024-11-26	2024-12-26	2025-03-26	4.50	6.00	7617000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+258	28	30	0	90	2024-08-16	2024-08-16	2024-09-15	2024-12-14	4.50	6.00	8304000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+259	14	30	0	90	2024-04-27	2024-04-27	2024-05-27	2024-08-25	4.50	6.00	1478000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+260	17	30	0	90	2024-05-28	2024-05-28	2024-06-27	2024-09-25	4.50	6.00	628000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+261	33	30	0	90	2025-01-19	2025-01-19	2025-02-18	2025-05-19	4.50	6.00	9426000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+262	23	30	0	90	2024-08-12	2024-08-12	2024-09-11	2024-12-10	4.50	6.00	699000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+263	42	30	0	90	2024-07-28	2024-07-28	2024-08-27	2024-11-25	4.50	6.00	6992000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+264	60	30	0	90	2024-06-07	2024-06-07	2024-07-07	2024-10-05	4.50	6.00	2259000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+265	78	30	0	90	2024-08-02	2024-08-02	2024-09-01	2024-11-30	4.50	6.00	4103000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+266	93	30	0	90	2025-03-02	2025-03-02	2025-04-01	2025-06-30	4.50	6.00	905000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+267	66	30	0	90	2024-04-03	2024-04-03	2024-05-03	2024-08-01	4.50	6.00	3485000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+268	85	30	0	90	2024-04-24	2024-04-24	2024-05-24	2024-08-22	4.50	6.00	7675000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+269	80	30	0	90	2025-02-02	2025-02-02	2025-03-04	2025-06-02	4.50	6.00	7935000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+270	83	30	0	90	2024-10-12	2024-10-12	2024-11-11	2025-02-09	4.50	6.00	4125000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+271	55	30	0	90	2025-03-24	2025-03-24	2025-04-23	2025-07-22	4.50	6.00	863000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+272	65	30	0	90	2025-02-11	2025-02-11	2025-03-13	2025-06-11	4.50	6.00	3821000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+273	14	30	0	90	2025-02-04	2025-02-04	2025-03-06	2025-06-04	4.50	6.00	8307000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+274	13	30	0	90	2024-11-16	2024-11-16	2024-12-16	2025-03-16	4.50	6.00	1092000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+275	21	30	0	90	2024-07-18	2024-07-18	2024-08-17	2024-11-15	4.50	6.00	8879000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+276	50	30	0	90	2025-01-10	2025-01-10	2025-02-09	2025-05-10	4.50	6.00	8842000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+277	39	30	0	90	2024-08-01	2024-08-01	2024-08-31	2024-11-29	4.50	6.00	1717000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+278	44	30	0	90	2024-07-22	2024-07-22	2024-08-21	2024-11-19	4.50	6.00	7672000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+279	43	30	0	90	2024-10-27	2024-10-27	2024-11-26	2025-02-24	4.50	6.00	5162000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+280	35	30	0	90	2024-11-12	2024-11-12	2024-12-12	2025-03-12	4.50	6.00	1590000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+281	59	30	0	90	2024-09-25	2024-09-25	2024-10-25	2025-01-23	4.50	6.00	5665000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+282	65	30	0	90	2024-12-31	2024-12-31	2025-01-30	2025-04-30	4.50	6.00	3509000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+283	5	30	0	90	2024-05-26	2024-05-26	2024-06-25	2024-09-23	4.50	6.00	161000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+284	5	30	0	90	2024-04-30	2024-04-30	2024-05-30	2024-08-28	4.50	6.00	7723000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+285	20	30	0	90	2025-02-17	2025-02-17	2025-03-19	2025-06-17	4.50	6.00	8107000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+286	56	30	0	90	2024-05-02	2024-05-02	2024-06-01	2024-08-30	4.50	6.00	8804000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+287	14	30	0	90	2025-01-25	2025-01-25	2025-02-24	2025-05-25	4.50	6.00	9160000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+288	31	30	0	90	2024-07-03	2024-07-03	2024-08-02	2024-10-31	4.50	6.00	5246000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+289	40	30	0	90	2025-03-21	2025-03-21	2025-04-20	2025-07-19	4.50	6.00	9244000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+290	37	30	0	90	2024-05-15	2024-05-15	2024-06-14	2024-09-12	4.50	6.00	9839000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+291	83	30	0	90	2024-11-21	2024-11-21	2024-12-21	2025-03-21	4.50	6.00	6466000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+292	73	30	0	90	2024-05-10	2024-05-10	2024-06-09	2024-09-07	4.50	6.00	2567000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+293	58	30	0	90	2025-01-09	2025-01-09	2025-02-08	2025-05-09	4.50	6.00	5273000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+294	27	30	0	90	2024-08-11	2024-08-11	2024-09-10	2024-12-09	4.50	6.00	9247000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+295	23	30	0	90	2024-06-27	2024-06-27	2024-07-27	2024-10-25	4.50	6.00	2636000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+296	84	30	0	90	2025-01-11	2025-01-11	2025-02-10	2025-05-11	4.50	6.00	6428000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+297	31	30	0	90	2024-11-10	2024-11-10	2024-12-10	2025-03-10	4.50	6.00	5026000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+298	73	30	0	90	2024-10-15	2024-10-15	2024-11-14	2025-02-12	4.50	6.00	2311000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+299	50	30	0	90	2024-06-26	2024-06-26	2024-07-26	2024-10-24	4.50	6.00	8629000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+300	14	30	0	90	2024-10-28	2024-10-28	2024-11-27	2025-02-25	4.50	6.00	7102000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+301	94	30	0	90	2024-11-20	2024-11-20	2024-12-20	2025-03-20	4.50	6.00	8266000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+302	87	30	0	90	2024-10-10	2024-10-10	2024-11-09	2025-02-07	4.50	6.00	4646000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+303	36	30	0	90	2024-07-10	2024-07-10	2024-08-09	2024-11-07	4.50	6.00	5097000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+304	99	30	0	90	2024-07-03	2024-07-03	2024-08-02	2024-10-31	4.50	6.00	5660000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+305	51	30	0	90	2025-01-12	2025-01-12	2025-02-11	2025-05-12	4.50	6.00	2207000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+306	72	30	0	90	2024-06-16	2024-06-16	2024-07-16	2024-10-14	4.50	6.00	4522000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+307	70	30	0	90	2024-04-18	2024-04-18	2024-05-18	2024-08-16	4.50	6.00	7937000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+308	33	30	0	90	2024-05-15	2024-05-15	2024-06-14	2024-09-12	4.50	6.00	3751000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+309	69	30	0	90	2024-04-22	2024-04-22	2024-05-22	2024-08-20	4.50	6.00	4686000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+310	64	30	0	90	2024-05-22	2024-05-22	2024-06-21	2024-09-19	4.50	6.00	1461000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+311	79	30	0	90	2025-03-27	2025-03-27	2025-04-26	2025-07-25	4.50	6.00	8327000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+312	64	30	0	90	2024-10-29	2024-10-29	2024-11-28	2025-02-26	4.50	6.00	4107000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+313	39	30	0	90	2025-01-05	2025-01-05	2025-02-04	2025-05-05	4.50	6.00	1360000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+314	63	30	0	90	2025-01-31	2025-01-31	2025-03-02	2025-05-31	4.50	6.00	310000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+315	71	30	0	90	2024-07-08	2024-07-08	2024-08-07	2024-11-05	4.50	6.00	6477000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+316	16	30	0	90	2025-02-08	2025-02-08	2025-03-10	2025-06-08	4.50	6.00	6386000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+317	76	30	0	90	2024-11-26	2024-11-26	2024-12-26	2025-03-26	4.50	6.00	5829000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+318	51	30	0	90	2025-03-12	2025-03-12	2025-04-11	2025-07-10	4.50	6.00	60000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+319	58	30	0	90	2024-09-15	2024-09-15	2024-10-15	2025-01-13	4.50	6.00	7325000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+320	81	30	0	90	2024-05-05	2024-05-05	2024-06-04	2024-09-02	4.50	6.00	7633000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+321	18	30	0	90	2025-02-10	2025-02-10	2025-03-12	2025-06-10	4.50	6.00	4090000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+322	47	30	0	90	2024-04-17	2024-04-17	2024-05-17	2024-08-15	4.50	6.00	3389000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+323	6	30	0	90	2025-03-23	2025-03-23	2025-04-22	2025-07-21	4.50	6.00	3398000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+324	51	30	0	90	2024-07-20	2024-07-20	2024-08-19	2024-11-17	4.50	6.00	9252000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+325	75	30	0	90	2024-08-10	2024-08-10	2024-09-09	2024-12-08	4.50	6.00	4251000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+326	99	30	0	90	2025-01-31	2025-01-31	2025-03-02	2025-05-31	4.50	6.00	3730000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+327	92	30	0	90	2024-08-19	2024-08-19	2024-09-18	2024-12-17	4.50	6.00	1558000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+328	75	30	0	90	2024-11-11	2024-11-11	2024-12-11	2025-03-11	4.50	6.00	628000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+329	28	30	0	90	2024-09-14	2024-09-14	2024-10-14	2025-01-12	4.50	6.00	1471000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+330	24	30	0	90	2024-12-19	2024-12-19	2025-01-18	2025-04-18	4.50	6.00	8384000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+331	60	30	0	90	2024-09-26	2024-09-26	2024-10-26	2025-01-24	4.50	6.00	6105000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+332	9	30	0	90	2025-02-27	2025-02-27	2025-03-29	2025-06-27	4.50	6.00	2824000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+333	7	30	0	90	2024-04-23	2024-04-23	2024-05-23	2024-08-21	4.50	6.00	656000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+334	6	30	0	90	2024-05-19	2024-05-19	2024-06-18	2024-09-16	4.50	6.00	8746000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+335	78	30	0	90	2025-03-03	2025-03-03	2025-04-02	2025-07-01	4.50	6.00	6567000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+336	35	30	0	90	2025-03-13	2025-03-13	2025-04-12	2025-07-11	4.50	6.00	9151000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+337	99	30	0	90	2024-06-15	2024-06-15	2024-07-15	2024-10-13	4.50	6.00	6316000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+338	8	30	0	90	2024-05-25	2024-05-25	2024-06-24	2024-09-22	4.50	6.00	4298000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+339	63	30	0	90	2024-07-05	2024-07-05	2024-08-04	2024-11-02	4.50	6.00	9520000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+340	72	30	0	90	2024-06-06	2024-06-06	2024-07-06	2024-10-04	4.50	6.00	5770000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+341	16	30	0	90	2024-11-10	2024-11-10	2024-12-10	2025-03-10	4.50	6.00	2336000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+342	56	30	0	90	2024-09-09	2024-09-09	2024-10-09	2025-01-07	4.50	6.00	7914000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+343	37	30	0	90	2024-04-26	2024-04-26	2024-05-26	2024-08-24	4.50	6.00	8593000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+344	89	30	0	90	2024-08-27	2024-08-27	2024-09-26	2024-12-25	4.50	6.00	6920000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+345	44	30	0	90	2024-07-05	2024-07-05	2024-08-04	2024-11-02	4.50	6.00	3916000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+346	33	30	0	90	2024-09-15	2024-09-15	2024-10-15	2025-01-13	4.50	6.00	128000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+347	38	30	0	90	2024-10-30	2024-10-30	2024-11-29	2025-02-27	4.50	6.00	5194000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+348	51	30	0	90	2025-01-31	2025-01-31	2025-03-02	2025-05-31	4.50	6.00	4504000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+349	37	30	0	90	2024-08-10	2024-08-10	2024-09-09	2024-12-08	4.50	6.00	9212000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+350	63	30	0	90	2024-10-06	2024-10-06	2024-11-05	2025-02-03	4.50	6.00	9082000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+351	13	30	0	90	2025-03-28	2025-03-28	2025-04-27	2025-07-26	4.50	6.00	4415000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+352	32	30	0	90	2025-03-19	2025-03-19	2025-04-18	2025-07-17	4.50	6.00	316000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+353	99	30	0	90	2025-02-09	2025-02-09	2025-03-11	2025-06-09	4.50	6.00	3176000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+354	24	30	0	90	2024-07-29	2024-07-29	2024-08-28	2024-11-26	4.50	6.00	8302000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+355	7	30	0	90	2024-08-24	2024-08-24	2024-09-23	2024-12-22	4.50	6.00	7930000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+356	44	30	0	90	2025-01-23	2025-01-23	2025-02-22	2025-05-23	4.50	6.00	1313000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+357	64	30	0	90	2024-08-13	2024-08-13	2024-09-12	2024-12-11	4.50	6.00	4481000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+358	56	30	0	90	2024-05-15	2024-05-15	2024-06-14	2024-09-12	4.50	6.00	8416000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+359	91	30	0	90	2024-06-09	2024-06-09	2024-07-09	2024-10-07	4.50	6.00	4276000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+360	25	30	0	90	2025-03-06	2025-03-06	2025-04-05	2025-07-04	4.50	6.00	3476000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+361	59	30	0	90	2024-11-30	2024-11-30	2024-12-30	2025-03-30	4.50	6.00	9350000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+362	29	30	0	90	2024-04-05	2024-04-05	2024-05-05	2024-08-03	4.50	6.00	7260000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+363	32	30	0	90	2024-09-02	2024-09-02	2024-10-02	2024-12-31	4.50	6.00	363000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+364	59	30	0	90	2025-01-31	2025-01-31	2025-03-02	2025-05-31	4.50	6.00	6906000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+365	59	30	0	90	2024-04-28	2024-04-28	2024-05-28	2024-08-26	4.50	6.00	8473000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+366	97	30	0	90	2024-06-26	2024-06-26	2024-07-26	2024-10-24	4.50	6.00	8777000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+367	98	30	0	90	2024-11-22	2024-11-22	2024-12-22	2025-03-22	4.50	6.00	8108000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+368	56	30	0	90	2024-08-03	2024-08-03	2024-09-02	2024-12-01	4.50	6.00	5620000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+369	37	30	0	90	2024-09-13	2024-09-13	2024-10-13	2025-01-11	4.50	6.00	157000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+370	94	30	0	90	2024-08-27	2024-08-27	2024-09-26	2024-12-25	4.50	6.00	5764000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+371	95	30	0	90	2024-07-08	2024-07-08	2024-08-07	2024-11-05	4.50	6.00	8777000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+372	80	30	0	90	2024-09-13	2024-09-13	2024-10-13	2025-01-11	4.50	6.00	8456000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+373	46	30	0	90	2025-02-03	2025-02-03	2025-03-05	2025-06-03	4.50	6.00	6814000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+374	60	30	0	90	2024-06-27	2024-06-27	2024-07-27	2024-10-25	4.50	6.00	8858000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+375	90	30	0	90	2024-07-26	2024-07-26	2024-08-25	2024-11-23	4.50	6.00	6810000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+376	56	30	0	90	2024-08-17	2024-08-17	2024-09-16	2024-12-15	4.50	6.00	8596000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+377	57	30	0	90	2024-05-18	2024-05-18	2024-06-17	2024-09-15	4.50	6.00	3294000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+378	53	30	0	90	2024-07-15	2024-07-15	2024-08-14	2024-11-12	4.50	6.00	8372000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+379	73	30	0	90	2025-02-15	2025-02-15	2025-03-17	2025-06-15	4.50	6.00	2894000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+380	20	30	0	90	2024-12-08	2024-12-08	2025-01-07	2025-04-07	4.50	6.00	9309000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+381	3	30	0	90	2024-08-22	2024-08-22	2024-09-21	2024-12-20	4.50	6.00	1306000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+382	15	30	0	90	2024-12-02	2024-12-02	2025-01-01	2025-04-01	4.50	6.00	900000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+383	28	30	0	90	2024-10-14	2024-10-14	2024-11-13	2025-02-11	4.50	6.00	5021000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+384	92	30	0	90	2024-04-12	2024-04-12	2024-05-12	2024-08-10	4.50	6.00	2352000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+385	30	30	0	90	2024-09-20	2024-09-20	2024-10-20	2025-01-18	4.50	6.00	9290000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+386	33	30	0	90	2024-04-14	2024-04-14	2024-05-14	2024-08-12	4.50	6.00	9764000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+387	61	30	0	90	2024-08-05	2024-08-05	2024-09-04	2024-12-03	4.50	6.00	6247000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+388	20	30	0	90	2025-02-19	2025-02-19	2025-03-21	2025-06-19	4.50	6.00	9848000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+389	66	30	0	90	2024-11-07	2024-11-07	2024-12-07	2025-03-07	4.50	6.00	9487000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+390	10	30	0	90	2024-12-20	2024-12-20	2025-01-19	2025-04-19	4.50	6.00	9835000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+391	20	30	0	90	2024-10-08	2024-10-08	2024-11-07	2025-02-05	4.50	6.00	214000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+392	95	30	0	90	2024-10-01	2024-10-01	2024-10-31	2025-01-29	4.50	6.00	6809000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+393	92	30	0	90	2024-09-19	2024-09-19	2024-10-19	2025-01-17	4.50	6.00	2273000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+394	27	30	0	90	2024-08-08	2024-08-08	2024-09-07	2024-12-06	4.50	6.00	2600000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+395	83	30	0	90	2024-09-18	2024-09-18	2024-10-18	2025-01-16	4.50	6.00	7850000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+396	8	30	0	90	2025-02-04	2025-02-04	2025-03-06	2025-06-04	4.50	6.00	6581000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+397	47	30	0	90	2024-10-25	2024-10-25	2024-11-24	2025-02-22	4.50	6.00	4544000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+398	81	30	0	90	2025-02-04	2025-02-04	2025-03-06	2025-06-04	4.50	6.00	1711000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+399	85	30	0	90	2024-04-13	2024-04-13	2024-05-13	2024-08-11	4.50	6.00	9843000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+400	9	30	0	90	2024-12-30	2024-12-30	2025-01-29	2025-04-29	4.50	6.00	8385000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+401	49	30	0	90	2024-08-27	2024-08-27	2024-09-26	2024-12-25	4.50	6.00	6700000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+402	54	30	0	90	2024-12-27	2024-12-27	2025-01-26	2025-04-26	4.50	6.00	1415000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+403	28	30	0	90	2025-03-04	2025-03-04	2025-04-03	2025-07-02	4.50	6.00	1851000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+404	19	30	0	90	2025-02-13	2025-02-13	2025-03-15	2025-06-13	4.50	6.00	8489000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+405	72	30	0	90	2024-07-15	2024-07-15	2024-08-14	2024-11-12	4.50	6.00	3841000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+406	49	30	0	90	2024-11-30	2024-11-30	2024-12-30	2025-03-30	4.50	6.00	7511000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+407	18	30	0	90	2024-07-14	2024-07-14	2024-08-13	2024-11-11	4.50	6.00	7816000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+408	12	30	0	90	2025-03-24	2025-03-24	2025-04-23	2025-07-22	4.50	6.00	6499000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+409	75	30	0	90	2024-08-04	2024-08-04	2024-09-03	2024-12-02	4.50	6.00	8609000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+410	33	30	0	90	2024-09-03	2024-09-03	2024-10-03	2025-01-01	4.50	6.00	4064000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+411	40	30	0	90	2024-04-11	2024-04-11	2024-05-11	2024-08-09	4.50	6.00	8729000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+412	36	30	0	90	2024-05-15	2024-05-15	2024-06-14	2024-09-12	4.50	6.00	6566000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+413	98	30	0	90	2024-04-20	2024-04-20	2024-05-20	2024-08-18	4.50	6.00	4349000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+414	40	30	0	90	2024-09-08	2024-09-08	2024-10-08	2025-01-06	4.50	6.00	8793000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+415	34	30	0	90	2024-04-24	2024-04-24	2024-05-24	2024-08-22	4.50	6.00	785000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+416	72	30	0	90	2025-02-17	2025-02-17	2025-03-19	2025-06-17	4.50	6.00	5280000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+417	80	30	0	90	2024-04-27	2024-04-27	2024-05-27	2024-08-25	4.50	6.00	4782000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+418	29	30	0	90	2024-07-11	2024-07-11	2024-08-10	2024-11-08	4.50	6.00	340000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+419	11	30	0	90	2024-08-05	2024-08-05	2024-09-04	2024-12-03	4.50	6.00	1393000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+420	45	30	0	90	2024-04-16	2024-04-16	2024-05-16	2024-08-14	4.50	6.00	1207000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+421	14	30	0	90	2024-04-26	2024-04-26	2024-05-26	2024-08-24	4.50	6.00	4918000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+422	53	30	0	90	2024-05-17	2024-05-17	2024-06-16	2024-09-14	4.50	6.00	4527000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+423	19	30	0	90	2024-05-07	2024-05-07	2024-06-06	2024-09-04	4.50	6.00	8638000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+424	62	30	0	90	2025-02-04	2025-02-04	2025-03-06	2025-06-04	4.50	6.00	2782000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+425	43	30	0	90	2024-10-09	2024-10-09	2024-11-08	2025-02-06	4.50	6.00	3193000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+426	92	30	0	90	2024-10-14	2024-10-14	2024-11-13	2025-02-11	4.50	6.00	7983000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+427	89	30	0	90	2025-02-09	2025-02-09	2025-03-11	2025-06-09	4.50	6.00	7561000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+428	35	30	0	90	2024-09-15	2024-09-15	2024-10-15	2025-01-13	4.50	6.00	7456000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+429	71	30	0	90	2025-03-05	2025-03-05	2025-04-04	2025-07-03	4.50	6.00	7153000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+430	46	30	0	90	2024-08-06	2024-08-06	2024-09-05	2024-12-04	4.50	6.00	9827000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+431	70	30	0	90	2025-03-17	2025-03-17	2025-04-16	2025-07-15	4.50	6.00	3802000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+432	75	30	0	90	2025-02-17	2025-02-17	2025-03-19	2025-06-17	4.50	6.00	6746000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+433	67	30	0	90	2025-02-01	2025-02-01	2025-03-03	2025-06-01	4.50	6.00	3211000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+434	56	30	0	90	2024-10-27	2024-10-27	2024-11-26	2025-02-24	4.50	6.00	4183000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+435	55	30	0	90	2024-12-01	2024-12-01	2024-12-31	2025-03-31	4.50	6.00	2366000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+436	13	30	0	90	2024-07-30	2024-07-30	2024-08-29	2024-11-27	4.50	6.00	3167000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+437	93	30	0	90	2024-05-25	2024-05-25	2024-06-24	2024-09-22	4.50	6.00	8100000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+438	62	30	0	90	2025-01-06	2025-01-06	2025-02-05	2025-05-06	4.50	6.00	2372000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+439	77	30	0	90	2024-08-28	2024-08-28	2024-09-27	2024-12-26	4.50	6.00	4499000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+440	9	30	0	90	2024-04-15	2024-04-15	2024-05-15	2024-08-13	4.50	6.00	7336000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+441	69	30	0	90	2024-11-03	2024-11-03	2024-12-03	2025-03-03	4.50	6.00	8752000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+442	100	30	0	90	2024-11-04	2024-11-04	2024-12-04	2025-03-04	4.50	6.00	9181000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+443	10	30	0	90	2025-03-08	2025-03-08	2025-04-07	2025-07-06	4.50	6.00	4490000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+444	94	30	0	90	2024-11-16	2024-11-16	2024-12-16	2025-03-16	4.50	6.00	8075000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+445	61	30	0	90	2025-03-01	2025-03-01	2025-03-31	2025-06-29	4.50	6.00	7390000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+446	5	30	0	90	2024-06-20	2024-06-20	2024-07-20	2024-10-18	4.50	6.00	4052000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+447	81	30	0	90	2024-12-31	2024-12-31	2025-01-30	2025-04-30	4.50	6.00	7247000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+448	85	30	0	90	2024-09-01	2024-09-01	2024-10-01	2024-12-30	4.50	6.00	8257000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+449	59	30	0	90	2024-08-24	2024-08-24	2024-09-23	2024-12-22	4.50	6.00	2181000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+450	73	30	0	90	2025-02-20	2025-02-20	2025-03-22	2025-06-20	4.50	6.00	6860000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+451	29	30	0	90	2024-09-04	2024-09-04	2024-10-04	2025-01-02	4.50	6.00	9283000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+452	81	30	0	90	2024-10-03	2024-10-03	2024-11-02	2025-01-31	4.50	6.00	6527000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+453	83	30	0	90	2024-09-27	2024-09-27	2024-10-27	2025-01-25	4.50	6.00	4154000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+454	39	30	0	90	2024-11-22	2024-11-22	2024-12-22	2025-03-22	4.50	6.00	7892000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+455	93	30	0	90	2024-10-10	2024-10-10	2024-11-09	2025-02-07	4.50	6.00	9261000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+456	9	30	0	90	2024-06-30	2024-06-30	2024-07-30	2024-10-28	4.50	6.00	1912000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+457	84	30	0	90	2025-02-22	2025-02-22	2025-03-24	2025-06-22	4.50	6.00	853000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+458	93	30	0	90	2024-04-21	2024-04-21	2024-05-21	2024-08-19	4.50	6.00	5952000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+459	1	30	0	90	2024-04-17	2024-04-17	2024-05-17	2024-08-15	4.50	6.00	7334000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+460	41	30	0	90	2024-09-04	2024-09-04	2024-10-04	2025-01-02	4.50	6.00	2477000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+461	57	30	0	90	2024-09-03	2024-09-03	2024-10-03	2025-01-01	4.50	6.00	426000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+462	92	30	0	90	2024-11-30	2024-11-30	2024-12-30	2025-03-30	4.50	6.00	767000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+463	40	30	0	90	2024-10-06	2024-10-06	2024-11-05	2025-02-03	4.50	6.00	2772000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+464	6	30	0	90	2025-03-25	2025-03-25	2025-04-24	2025-07-23	4.50	6.00	6998000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+465	32	30	0	90	2024-03-29	2024-03-29	2024-04-28	2024-07-27	4.50	6.00	2402000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+466	88	30	0	90	2025-03-02	2025-03-02	2025-04-01	2025-06-30	4.50	6.00	3068000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+467	58	30	0	90	2025-01-27	2025-01-27	2025-02-26	2025-05-27	4.50	6.00	7040000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+468	73	30	0	90	2024-09-13	2024-09-13	2024-10-13	2025-01-11	4.50	6.00	9538000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+469	19	30	0	90	2024-03-29	2024-03-29	2024-04-28	2024-07-27	4.50	6.00	9308000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+470	13	30	0	90	2024-10-20	2024-10-20	2024-11-19	2025-02-17	4.50	6.00	9587000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+471	56	30	0	90	2024-06-25	2024-06-25	2024-07-25	2024-10-23	4.50	6.00	9424000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+472	17	30	0	90	2024-12-13	2024-12-13	2025-01-12	2025-04-12	4.50	6.00	311000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+473	29	30	0	90	2025-02-27	2025-02-27	2025-03-29	2025-06-27	4.50	6.00	7998000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+474	3	30	0	90	2025-01-28	2025-01-28	2025-02-27	2025-05-28	4.50	6.00	4355000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+475	68	30	0	90	2024-08-12	2024-08-12	2024-09-11	2024-12-10	4.50	6.00	5484000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+476	69	30	0	90	2025-02-13	2025-02-13	2025-03-15	2025-06-13	4.50	6.00	9005000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+477	47	30	0	90	2025-01-24	2025-01-24	2025-02-23	2025-05-24	4.50	6.00	6970000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+478	64	30	0	90	2024-11-29	2024-11-29	2024-12-29	2025-03-29	4.50	6.00	2264000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+479	29	30	0	90	2024-07-03	2024-07-03	2024-08-02	2024-10-31	4.50	6.00	8275000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+480	22	30	0	90	2024-12-28	2024-12-28	2025-01-27	2025-04-27	4.50	6.00	4312000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+481	56	30	0	90	2024-05-15	2024-05-15	2024-06-14	2024-09-12	4.50	6.00	1469000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+482	98	30	0	90	2025-01-23	2025-01-23	2025-02-22	2025-05-23	4.50	6.00	6872000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+483	74	30	0	90	2024-08-17	2024-08-17	2024-09-16	2024-12-15	4.50	6.00	28000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+484	37	30	0	90	2024-10-19	2024-10-19	2024-11-18	2025-02-16	4.50	6.00	6278000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+485	100	30	0	90	2024-04-13	2024-04-13	2024-05-13	2024-08-11	4.50	6.00	2667000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+486	78	30	0	90	2024-08-27	2024-08-27	2024-09-26	2024-12-25	4.50	6.00	6545000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+487	3	30	0	90	2024-04-25	2024-04-25	2024-05-25	2024-08-23	4.50	6.00	7404000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+488	20	30	0	90	2024-07-26	2024-07-26	2024-08-25	2024-11-23	4.50	6.00	5194000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+489	57	30	0	90	2024-10-10	2024-10-10	2024-11-09	2025-02-07	4.50	6.00	3094000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+490	65	30	0	90	2024-10-05	2024-10-05	2024-11-04	2025-02-02	4.50	6.00	9578000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+491	21	30	0	90	2024-07-31	2024-07-31	2024-08-30	2024-11-28	4.50	6.00	9756000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+492	42	30	0	90	2024-06-02	2024-06-02	2024-07-02	2024-09-30	4.50	6.00	4940000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+493	67	30	0	90	2024-05-16	2024-05-16	2024-06-15	2024-09-13	4.50	6.00	1395000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+494	66	30	0	90	2025-03-16	2025-03-16	2025-04-15	2025-07-14	4.50	6.00	1561000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+495	11	30	0	90	2024-04-25	2024-04-25	2024-05-25	2024-08-23	4.50	6.00	4411000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+496	2	30	0	90	2025-03-16	2025-03-16	2025-04-15	2025-07-14	4.50	6.00	1837000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+497	64	30	0	90	2025-01-12	2025-01-12	2025-02-11	2025-05-12	4.50	6.00	6546000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+498	84	30	0	90	2025-01-03	2025-01-03	2025-02-02	2025-05-03	4.50	6.00	1929000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+499	37	30	0	90	2024-03-30	2024-03-30	2024-04-29	2024-07-28	4.50	6.00	8394000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+500	10	30	0	90	2025-01-28	2025-01-28	2025-02-27	2025-05-28	4.50	6.00	7865000.00	0.00	0.00	2025-03-30 15:05:06.82099+02	2025-03-30 15:05:06.82099+02
+501	1	30	0	90	2025-04-02	2025-04-02	2025-05-02	2025-07-31	4.50	6.00	1000000.00	0.00	0.00	2025-04-02 16:53:24.201039+02	2025-04-02 16:53:24.201039+02
+1	3	30	0	90	2024-06-19	2024-06-19	2024-07-19	2024-10-17	4.50	6.00	1821000.00	21000.00	0.00	2025-03-30 15:05:06.82099+02	2025-04-02 19:40:21.897899+02
+\.
+
+
+--
+-- TOC entry 4998 (class 0 OID 16628)
+-- Dependencies: 225
+-- Data for Name: transactions; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.transactions (id, transaction_amount, transaction_purpose, loan_id, employee_id, customer_id, transaction_direction, principle_amount, created_at, updated_at) FROM stdin;
+1	1821000.00	loan_give_out	1	104	3	out	1821000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+2	9762000.00	loan_give_out	2	105	85	out	9762000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+3	6368000.00	loan_give_out	3	106	83	out	6368000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+4	1153000.00	loan_give_out	4	107	67	out	1153000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+5	7827000.00	loan_give_out	5	108	3	out	7827000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+6	2033000.00	loan_give_out	6	109	53	out	2033000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+7	1601000.00	loan_give_out	7	110	8	out	1601000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+8	7163000.00	loan_give_out	8	104	7	out	7163000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+9	2196000.00	loan_give_out	9	105	24	out	2196000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+10	2826000.00	loan_give_out	10	106	91	out	2826000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+11	3460000.00	loan_give_out	11	107	84	out	3460000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+12	8994000.00	loan_give_out	12	108	92	out	8994000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+13	5888000.00	loan_give_out	13	109	16	out	5888000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+14	8162000.00	loan_give_out	14	110	33	out	8162000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+15	6204000.00	loan_give_out	15	104	92	out	6204000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+16	8462000.00	loan_give_out	16	105	33	out	8462000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+17	1832000.00	loan_give_out	17	106	71	out	1832000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+18	3524000.00	loan_give_out	18	107	31	out	3524000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+19	254000.00	loan_give_out	19	108	13	out	254000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+20	5199000.00	loan_give_out	20	109	81	out	5199000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+21	3995000.00	loan_give_out	21	110	12	out	3995000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+22	174000.00	loan_give_out	22	104	66	out	174000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+23	6581000.00	loan_give_out	23	105	7	out	6581000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+24	8690000.00	loan_give_out	24	106	34	out	8690000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+25	7431000.00	loan_give_out	25	107	93	out	7431000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+26	7627000.00	loan_give_out	26	108	12	out	7627000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+27	9251000.00	loan_give_out	27	109	37	out	9251000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+28	1528000.00	loan_give_out	28	110	36	out	1528000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+29	1681000.00	loan_give_out	29	104	99	out	1681000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+30	8901000.00	loan_give_out	30	105	69	out	8901000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+31	9335000.00	loan_give_out	31	106	88	out	9335000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+32	7608000.00	loan_give_out	32	107	73	out	7608000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+33	2430000.00	loan_give_out	33	108	74	out	2430000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+34	5648000.00	loan_give_out	34	109	20	out	5648000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+35	9526000.00	loan_give_out	35	110	61	out	9526000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+36	6137000.00	loan_give_out	36	104	55	out	6137000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+37	2927000.00	loan_give_out	37	105	86	out	2927000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+38	5111000.00	loan_give_out	38	106	53	out	5111000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+39	385000.00	loan_give_out	39	107	19	out	385000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+40	6613000.00	loan_give_out	40	108	53	out	6613000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+41	3748000.00	loan_give_out	41	109	31	out	3748000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+42	4865000.00	loan_give_out	42	110	7	out	4865000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+43	6176000.00	loan_give_out	43	104	56	out	6176000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+44	7106000.00	loan_give_out	44	105	96	out	7106000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+45	5370000.00	loan_give_out	45	106	61	out	5370000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+46	3876000.00	loan_give_out	46	107	92	out	3876000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+47	3611000.00	loan_give_out	47	108	58	out	3611000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+48	3355000.00	loan_give_out	48	109	42	out	3355000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+49	2442000.00	loan_give_out	49	110	16	out	2442000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+50	5974000.00	loan_give_out	50	104	6	out	5974000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+51	7762000.00	loan_give_out	51	105	31	out	7762000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+52	7456000.00	loan_give_out	52	106	17	out	7456000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+53	4563000.00	loan_give_out	53	107	68	out	4563000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+54	87000.00	loan_give_out	54	108	46	out	87000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+55	6310000.00	loan_give_out	55	109	29	out	6310000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+56	8732000.00	loan_give_out	56	110	93	out	8732000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+57	7093000.00	loan_give_out	57	104	22	out	7093000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+58	1795000.00	loan_give_out	58	105	81	out	1795000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+59	2847000.00	loan_give_out	59	106	87	out	2847000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+60	4123000.00	loan_give_out	60	107	7	out	4123000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+61	6222000.00	loan_give_out	61	108	68	out	6222000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+62	6033000.00	loan_give_out	62	109	66	out	6033000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+63	9076000.00	loan_give_out	63	110	3	out	9076000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+64	3284000.00	loan_give_out	64	104	98	out	3284000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+65	7670000.00	loan_give_out	65	105	14	out	7670000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+66	200000.00	loan_give_out	66	106	53	out	200000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+67	1088000.00	loan_give_out	67	107	17	out	1088000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+68	8368000.00	loan_give_out	68	108	27	out	8368000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+69	4472000.00	loan_give_out	69	109	44	out	4472000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+70	6038000.00	loan_give_out	70	110	55	out	6038000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+71	3341000.00	loan_give_out	71	104	85	out	3341000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+72	3236000.00	loan_give_out	72	105	12	out	3236000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+73	7862000.00	loan_give_out	73	106	38	out	7862000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+74	1543000.00	loan_give_out	74	107	95	out	1543000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+75	9287000.00	loan_give_out	75	108	88	out	9287000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+76	815000.00	loan_give_out	76	109	64	out	815000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+77	8309000.00	loan_give_out	77	110	58	out	8309000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+78	2491000.00	loan_give_out	78	104	74	out	2491000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+79	809000.00	loan_give_out	79	105	37	out	809000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+80	4531000.00	loan_give_out	80	106	10	out	4531000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+81	5578000.00	loan_give_out	81	107	68	out	5578000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+82	2047000.00	loan_give_out	82	108	45	out	2047000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+83	8706000.00	loan_give_out	83	109	80	out	8706000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+84	7258000.00	loan_give_out	84	110	43	out	7258000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+85	5046000.00	loan_give_out	85	104	35	out	5046000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+86	2794000.00	loan_give_out	86	105	96	out	2794000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+87	3315000.00	loan_give_out	87	106	68	out	3315000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+88	9101000.00	loan_give_out	88	107	39	out	9101000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+89	8589000.00	loan_give_out	89	108	6	out	8589000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+90	4441000.00	loan_give_out	90	109	5	out	4441000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+91	9648000.00	loan_give_out	91	110	76	out	9648000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+92	7624000.00	loan_give_out	92	104	36	out	7624000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+93	9602000.00	loan_give_out	93	105	61	out	9602000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+94	9879000.00	loan_give_out	94	106	72	out	9879000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+95	3751000.00	loan_give_out	95	107	72	out	3751000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+96	8446000.00	loan_give_out	96	108	54	out	8446000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+97	2169000.00	loan_give_out	97	109	23	out	2169000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+98	5510000.00	loan_give_out	98	110	45	out	5510000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+99	7186000.00	loan_give_out	99	104	67	out	7186000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+100	525000.00	loan_give_out	100	105	49	out	525000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+101	6901000.00	loan_give_out	101	106	21	out	6901000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+102	763000.00	loan_give_out	102	107	76	out	763000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+103	7006000.00	loan_give_out	103	108	22	out	7006000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+104	160000.00	loan_give_out	104	109	22	out	160000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+105	344000.00	loan_give_out	105	110	30	out	344000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+106	6294000.00	loan_give_out	106	104	56	out	6294000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+107	6720000.00	loan_give_out	107	105	92	out	6720000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+108	5149000.00	loan_give_out	108	106	96	out	5149000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+109	2000000.00	loan_give_out	109	107	7	out	2000000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+110	32000.00	loan_give_out	110	108	63	out	32000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+111	6032000.00	loan_give_out	111	109	53	out	6032000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+112	8628000.00	loan_give_out	112	110	72	out	8628000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+113	8800000.00	loan_give_out	113	104	25	out	8800000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+114	1038000.00	loan_give_out	114	105	49	out	1038000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+115	1254000.00	loan_give_out	115	106	44	out	1254000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+116	1149000.00	loan_give_out	116	107	55	out	1149000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+117	5459000.00	loan_give_out	117	108	7	out	5459000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+118	3018000.00	loan_give_out	118	109	3	out	3018000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+119	7561000.00	loan_give_out	119	110	30	out	7561000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+120	2435000.00	loan_give_out	120	104	29	out	2435000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+121	2408000.00	loan_give_out	121	105	34	out	2408000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+122	7453000.00	loan_give_out	122	106	14	out	7453000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+123	5989000.00	loan_give_out	123	107	38	out	5989000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+124	666000.00	loan_give_out	124	108	15	out	666000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+125	1536000.00	loan_give_out	125	109	69	out	1536000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+126	6891000.00	loan_give_out	126	110	96	out	6891000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+127	9031000.00	loan_give_out	127	104	49	out	9031000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+128	7311000.00	loan_give_out	128	105	84	out	7311000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+129	2339000.00	loan_give_out	129	106	58	out	2339000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+130	6528000.00	loan_give_out	130	107	32	out	6528000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+131	1778000.00	loan_give_out	131	108	55	out	1778000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+132	2364000.00	loan_give_out	132	109	9	out	2364000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+133	4842000.00	loan_give_out	133	110	57	out	4842000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+134	7704000.00	loan_give_out	134	104	72	out	7704000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+135	5087000.00	loan_give_out	135	105	93	out	5087000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+136	3212000.00	loan_give_out	136	106	37	out	3212000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+137	4962000.00	loan_give_out	137	107	5	out	4962000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+138	6550000.00	loan_give_out	138	108	30	out	6550000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+139	8926000.00	loan_give_out	139	109	35	out	8926000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+140	4582000.00	loan_give_out	140	110	17	out	4582000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+141	366000.00	loan_give_out	141	104	91	out	366000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+142	6355000.00	loan_give_out	142	105	51	out	6355000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+143	987000.00	loan_give_out	143	106	30	out	987000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+144	3859000.00	loan_give_out	144	107	58	out	3859000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+145	5463000.00	loan_give_out	145	108	91	out	5463000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+146	2752000.00	loan_give_out	146	109	93	out	2752000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+147	845000.00	loan_give_out	147	110	68	out	845000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+148	8662000.00	loan_give_out	148	104	73	out	8662000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+149	7457000.00	loan_give_out	149	105	3	out	7457000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+150	3145000.00	loan_give_out	150	106	38	out	3145000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+151	6777000.00	loan_give_out	151	107	30	out	6777000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+152	9222000.00	loan_give_out	152	108	25	out	9222000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+153	2567000.00	loan_give_out	153	109	86	out	2567000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+154	3543000.00	loan_give_out	154	110	54	out	3543000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+155	9352000.00	loan_give_out	155	104	28	out	9352000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+156	5473000.00	loan_give_out	156	105	63	out	5473000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+157	9747000.00	loan_give_out	157	106	91	out	9747000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+158	3556000.00	loan_give_out	158	107	42	out	3556000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+159	5581000.00	loan_give_out	159	108	76	out	5581000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+160	1435000.00	loan_give_out	160	109	51	out	1435000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+161	5472000.00	loan_give_out	161	110	65	out	5472000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+162	4178000.00	loan_give_out	162	104	15	out	4178000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+163	8451000.00	loan_give_out	163	105	55	out	8451000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+164	1778000.00	loan_give_out	164	106	29	out	1778000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+165	1549000.00	loan_give_out	165	107	47	out	1549000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+166	4042000.00	loan_give_out	166	108	1	out	4042000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+167	6777000.00	loan_give_out	167	109	83	out	6777000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+168	1871000.00	loan_give_out	168	110	52	out	1871000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+169	2022000.00	loan_give_out	169	104	63	out	2022000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+170	6305000.00	loan_give_out	170	105	63	out	6305000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+171	2796000.00	loan_give_out	171	106	96	out	2796000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+172	2375000.00	loan_give_out	172	107	23	out	2375000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+173	4688000.00	loan_give_out	173	108	47	out	4688000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+174	8875000.00	loan_give_out	174	109	74	out	8875000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+175	4857000.00	loan_give_out	175	110	48	out	4857000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+176	2587000.00	loan_give_out	176	104	70	out	2587000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+177	8381000.00	loan_give_out	177	105	97	out	8381000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+178	2971000.00	loan_give_out	178	106	56	out	2971000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+179	1938000.00	loan_give_out	179	107	94	out	1938000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+180	3929000.00	loan_give_out	180	108	70	out	3929000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+181	2671000.00	loan_give_out	181	109	96	out	2671000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+182	8479000.00	loan_give_out	182	110	91	out	8479000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+183	5904000.00	loan_give_out	183	104	80	out	5904000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+184	6514000.00	loan_give_out	184	105	41	out	6514000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+185	498000.00	loan_give_out	185	106	34	out	498000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+186	8350000.00	loan_give_out	186	107	37	out	8350000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+187	3935000.00	loan_give_out	187	108	96	out	3935000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+188	4402000.00	loan_give_out	188	109	6	out	4402000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+189	5600000.00	loan_give_out	189	110	97	out	5600000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+190	324000.00	loan_give_out	190	104	23	out	324000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+191	7454000.00	loan_give_out	191	105	17	out	7454000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+192	4280000.00	loan_give_out	192	106	34	out	4280000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+193	3365000.00	loan_give_out	193	107	31	out	3365000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+194	5819000.00	loan_give_out	194	108	46	out	5819000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+195	222000.00	loan_give_out	195	109	12	out	222000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+196	1409000.00	loan_give_out	196	110	74	out	1409000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+197	3796000.00	loan_give_out	197	104	95	out	3796000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+198	6188000.00	loan_give_out	198	105	8	out	6188000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+199	5043000.00	loan_give_out	199	106	82	out	5043000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+200	1821000.00	loan_give_out	200	107	77	out	1821000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+201	8842000.00	loan_give_out	201	108	40	out	8842000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+202	5161000.00	loan_give_out	202	109	49	out	5161000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+203	5004000.00	loan_give_out	203	110	85	out	5004000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+204	4257000.00	loan_give_out	204	104	88	out	4257000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+205	3930000.00	loan_give_out	205	105	6	out	3930000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+206	2709000.00	loan_give_out	206	106	34	out	2709000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+207	5032000.00	loan_give_out	207	107	76	out	5032000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+208	8181000.00	loan_give_out	208	108	23	out	8181000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+209	3287000.00	loan_give_out	209	109	45	out	3287000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+210	6839000.00	loan_give_out	210	110	40	out	6839000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+211	9374000.00	loan_give_out	211	104	68	out	9374000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+212	3178000.00	loan_give_out	212	105	50	out	3178000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+213	7458000.00	loan_give_out	213	106	74	out	7458000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+214	2100000.00	loan_give_out	214	107	76	out	2100000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+215	1110000.00	loan_give_out	215	108	37	out	1110000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+216	121000.00	loan_give_out	216	109	75	out	121000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+217	4617000.00	loan_give_out	217	110	8	out	4617000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+218	2751000.00	loan_give_out	218	104	10	out	2751000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+219	7184000.00	loan_give_out	219	105	76	out	7184000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+220	5587000.00	loan_give_out	220	106	21	out	5587000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+221	984000.00	loan_give_out	221	107	28	out	984000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+222	8299000.00	loan_give_out	222	108	65	out	8299000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+223	2140000.00	loan_give_out	223	109	34	out	2140000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+224	6757000.00	loan_give_out	224	110	5	out	6757000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+225	9748000.00	loan_give_out	225	104	68	out	9748000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+226	4717000.00	loan_give_out	226	105	54	out	4717000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+227	4195000.00	loan_give_out	227	106	55	out	4195000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+228	9696000.00	loan_give_out	228	107	82	out	9696000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+229	4351000.00	loan_give_out	229	108	86	out	4351000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+230	1702000.00	loan_give_out	230	109	46	out	1702000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+231	3174000.00	loan_give_out	231	110	58	out	3174000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+232	467000.00	loan_give_out	232	104	3	out	467000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+233	1531000.00	loan_give_out	233	105	28	out	1531000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+234	796000.00	loan_give_out	234	106	42	out	796000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+235	6481000.00	loan_give_out	235	107	23	out	6481000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+236	9629000.00	loan_give_out	236	108	95	out	9629000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+237	4132000.00	loan_give_out	237	109	25	out	4132000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+238	3237000.00	loan_give_out	238	110	86	out	3237000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+239	1597000.00	loan_give_out	239	104	18	out	1597000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+240	2302000.00	loan_give_out	240	105	36	out	2302000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+241	7823000.00	loan_give_out	241	106	7	out	7823000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+242	8173000.00	loan_give_out	242	107	34	out	8173000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+243	7421000.00	loan_give_out	243	108	80	out	7421000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+244	7703000.00	loan_give_out	244	109	61	out	7703000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+245	4331000.00	loan_give_out	245	110	48	out	4331000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+246	4708000.00	loan_give_out	246	104	68	out	4708000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+247	3675000.00	loan_give_out	247	105	44	out	3675000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+248	2401000.00	loan_give_out	248	106	26	out	2401000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+249	9661000.00	loan_give_out	249	107	83	out	9661000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+250	9061000.00	loan_give_out	250	108	14	out	9061000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+251	7394000.00	loan_give_out	251	109	62	out	7394000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+252	864000.00	loan_give_out	252	110	10	out	864000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+253	3936000.00	loan_give_out	253	104	91	out	3936000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+254	5654000.00	loan_give_out	254	105	98	out	5654000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+255	8596000.00	loan_give_out	255	106	73	out	8596000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+256	4615000.00	loan_give_out	256	107	98	out	4615000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+257	7617000.00	loan_give_out	257	108	21	out	7617000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+258	8304000.00	loan_give_out	258	109	28	out	8304000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+259	1478000.00	loan_give_out	259	110	14	out	1478000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+260	628000.00	loan_give_out	260	104	17	out	628000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+261	9426000.00	loan_give_out	261	105	33	out	9426000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+262	699000.00	loan_give_out	262	106	23	out	699000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+263	6992000.00	loan_give_out	263	107	42	out	6992000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+264	2259000.00	loan_give_out	264	108	60	out	2259000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+265	4103000.00	loan_give_out	265	109	78	out	4103000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+266	905000.00	loan_give_out	266	110	93	out	905000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+267	3485000.00	loan_give_out	267	104	66	out	3485000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+268	7675000.00	loan_give_out	268	105	85	out	7675000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+269	7935000.00	loan_give_out	269	106	80	out	7935000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+270	4125000.00	loan_give_out	270	107	83	out	4125000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+271	863000.00	loan_give_out	271	108	55	out	863000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+272	3821000.00	loan_give_out	272	109	65	out	3821000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+273	8307000.00	loan_give_out	273	110	14	out	8307000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+274	1092000.00	loan_give_out	274	104	13	out	1092000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+275	8879000.00	loan_give_out	275	105	21	out	8879000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+276	8842000.00	loan_give_out	276	106	50	out	8842000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+277	1717000.00	loan_give_out	277	107	39	out	1717000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+278	7672000.00	loan_give_out	278	108	44	out	7672000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+279	5162000.00	loan_give_out	279	109	43	out	5162000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+280	1590000.00	loan_give_out	280	110	35	out	1590000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+281	5665000.00	loan_give_out	281	104	59	out	5665000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+282	3509000.00	loan_give_out	282	105	65	out	3509000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+283	161000.00	loan_give_out	283	106	5	out	161000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+284	7723000.00	loan_give_out	284	107	5	out	7723000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+285	8107000.00	loan_give_out	285	108	20	out	8107000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+286	8804000.00	loan_give_out	286	109	56	out	8804000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+287	9160000.00	loan_give_out	287	110	14	out	9160000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+288	5246000.00	loan_give_out	288	104	31	out	5246000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+289	9244000.00	loan_give_out	289	105	40	out	9244000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+290	9839000.00	loan_give_out	290	106	37	out	9839000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+291	6466000.00	loan_give_out	291	107	83	out	6466000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+292	2567000.00	loan_give_out	292	108	73	out	2567000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+293	5273000.00	loan_give_out	293	109	58	out	5273000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+294	9247000.00	loan_give_out	294	110	27	out	9247000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+295	2636000.00	loan_give_out	295	104	23	out	2636000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+296	6428000.00	loan_give_out	296	105	84	out	6428000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+297	5026000.00	loan_give_out	297	106	31	out	5026000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+298	2311000.00	loan_give_out	298	107	73	out	2311000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+299	8629000.00	loan_give_out	299	108	50	out	8629000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+300	7102000.00	loan_give_out	300	109	14	out	7102000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+301	8266000.00	loan_give_out	301	110	94	out	8266000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+302	4646000.00	loan_give_out	302	104	87	out	4646000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+303	5097000.00	loan_give_out	303	105	36	out	5097000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+304	5660000.00	loan_give_out	304	106	99	out	5660000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+305	2207000.00	loan_give_out	305	107	51	out	2207000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+306	4522000.00	loan_give_out	306	108	72	out	4522000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+307	7937000.00	loan_give_out	307	109	70	out	7937000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+308	3751000.00	loan_give_out	308	110	33	out	3751000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+309	4686000.00	loan_give_out	309	104	69	out	4686000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+310	1461000.00	loan_give_out	310	105	64	out	1461000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+311	8327000.00	loan_give_out	311	106	79	out	8327000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+312	4107000.00	loan_give_out	312	107	64	out	4107000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+313	1360000.00	loan_give_out	313	108	39	out	1360000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+314	310000.00	loan_give_out	314	109	63	out	310000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+315	6477000.00	loan_give_out	315	110	71	out	6477000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+316	6386000.00	loan_give_out	316	104	16	out	6386000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+317	5829000.00	loan_give_out	317	105	76	out	5829000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+318	60000.00	loan_give_out	318	106	51	out	60000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+319	7325000.00	loan_give_out	319	107	58	out	7325000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+320	7633000.00	loan_give_out	320	108	81	out	7633000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+321	4090000.00	loan_give_out	321	109	18	out	4090000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+322	3389000.00	loan_give_out	322	110	47	out	3389000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+323	3398000.00	loan_give_out	323	104	6	out	3398000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+324	9252000.00	loan_give_out	324	105	51	out	9252000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+325	4251000.00	loan_give_out	325	106	75	out	4251000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+326	3730000.00	loan_give_out	326	107	99	out	3730000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+327	1558000.00	loan_give_out	327	108	92	out	1558000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+328	628000.00	loan_give_out	328	109	75	out	628000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+329	1471000.00	loan_give_out	329	110	28	out	1471000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+330	8384000.00	loan_give_out	330	104	24	out	8384000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+331	6105000.00	loan_give_out	331	105	60	out	6105000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+332	2824000.00	loan_give_out	332	106	9	out	2824000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+333	656000.00	loan_give_out	333	107	7	out	656000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+334	8746000.00	loan_give_out	334	108	6	out	8746000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+335	6567000.00	loan_give_out	335	109	78	out	6567000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+336	9151000.00	loan_give_out	336	110	35	out	9151000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+337	6316000.00	loan_give_out	337	104	99	out	6316000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+338	4298000.00	loan_give_out	338	105	8	out	4298000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+339	9520000.00	loan_give_out	339	106	63	out	9520000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+340	5770000.00	loan_give_out	340	107	72	out	5770000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+341	2336000.00	loan_give_out	341	108	16	out	2336000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+342	7914000.00	loan_give_out	342	109	56	out	7914000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+343	8593000.00	loan_give_out	343	110	37	out	8593000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+344	6920000.00	loan_give_out	344	104	89	out	6920000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+345	3916000.00	loan_give_out	345	105	44	out	3916000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+346	128000.00	loan_give_out	346	106	33	out	128000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+347	5194000.00	loan_give_out	347	107	38	out	5194000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+348	4504000.00	loan_give_out	348	108	51	out	4504000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+349	9212000.00	loan_give_out	349	109	37	out	9212000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+350	9082000.00	loan_give_out	350	110	63	out	9082000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+351	4415000.00	loan_give_out	351	104	13	out	4415000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+352	316000.00	loan_give_out	352	105	32	out	316000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+353	3176000.00	loan_give_out	353	106	99	out	3176000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+354	8302000.00	loan_give_out	354	107	24	out	8302000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+355	7930000.00	loan_give_out	355	108	7	out	7930000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+356	1313000.00	loan_give_out	356	109	44	out	1313000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+357	4481000.00	loan_give_out	357	110	64	out	4481000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+358	8416000.00	loan_give_out	358	104	56	out	8416000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+359	4276000.00	loan_give_out	359	105	91	out	4276000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+360	3476000.00	loan_give_out	360	106	25	out	3476000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+361	9350000.00	loan_give_out	361	107	59	out	9350000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+362	7260000.00	loan_give_out	362	108	29	out	7260000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+363	363000.00	loan_give_out	363	109	32	out	363000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+364	6906000.00	loan_give_out	364	110	59	out	6906000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+365	8473000.00	loan_give_out	365	104	59	out	8473000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+366	8777000.00	loan_give_out	366	105	97	out	8777000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+367	8108000.00	loan_give_out	367	106	98	out	8108000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+368	5620000.00	loan_give_out	368	107	56	out	5620000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+369	157000.00	loan_give_out	369	108	37	out	157000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+370	5764000.00	loan_give_out	370	109	94	out	5764000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+371	8777000.00	loan_give_out	371	110	95	out	8777000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+372	8456000.00	loan_give_out	372	104	80	out	8456000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+373	6814000.00	loan_give_out	373	105	46	out	6814000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+374	8858000.00	loan_give_out	374	106	60	out	8858000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+375	6810000.00	loan_give_out	375	107	90	out	6810000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+376	8596000.00	loan_give_out	376	108	56	out	8596000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+377	3294000.00	loan_give_out	377	109	57	out	3294000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+378	8372000.00	loan_give_out	378	110	53	out	8372000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+379	2894000.00	loan_give_out	379	104	73	out	2894000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+380	9309000.00	loan_give_out	380	105	20	out	9309000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+381	1306000.00	loan_give_out	381	106	3	out	1306000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+382	900000.00	loan_give_out	382	107	15	out	900000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+383	5021000.00	loan_give_out	383	108	28	out	5021000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+384	2352000.00	loan_give_out	384	109	92	out	2352000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+385	9290000.00	loan_give_out	385	110	30	out	9290000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+386	9764000.00	loan_give_out	386	104	33	out	9764000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+387	6247000.00	loan_give_out	387	105	61	out	6247000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+388	9848000.00	loan_give_out	388	106	20	out	9848000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+389	9487000.00	loan_give_out	389	107	66	out	9487000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+390	9835000.00	loan_give_out	390	108	10	out	9835000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+391	214000.00	loan_give_out	391	109	20	out	214000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+392	6809000.00	loan_give_out	392	110	95	out	6809000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+393	2273000.00	loan_give_out	393	104	92	out	2273000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+394	2600000.00	loan_give_out	394	105	27	out	2600000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+395	7850000.00	loan_give_out	395	106	83	out	7850000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+396	6581000.00	loan_give_out	396	107	8	out	6581000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+397	4544000.00	loan_give_out	397	108	47	out	4544000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+398	1711000.00	loan_give_out	398	109	81	out	1711000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+399	9843000.00	loan_give_out	399	110	85	out	9843000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+400	8385000.00	loan_give_out	400	104	9	out	8385000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+401	6700000.00	loan_give_out	401	105	49	out	6700000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+402	1415000.00	loan_give_out	402	106	54	out	1415000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+403	1851000.00	loan_give_out	403	107	28	out	1851000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+404	8489000.00	loan_give_out	404	108	19	out	8489000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+405	3841000.00	loan_give_out	405	109	72	out	3841000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+406	7511000.00	loan_give_out	406	110	49	out	7511000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+407	7816000.00	loan_give_out	407	104	18	out	7816000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+408	6499000.00	loan_give_out	408	105	12	out	6499000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+409	8609000.00	loan_give_out	409	106	75	out	8609000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+410	4064000.00	loan_give_out	410	107	33	out	4064000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+411	8729000.00	loan_give_out	411	108	40	out	8729000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+412	6566000.00	loan_give_out	412	109	36	out	6566000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+413	4349000.00	loan_give_out	413	110	98	out	4349000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+414	8793000.00	loan_give_out	414	104	40	out	8793000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+415	785000.00	loan_give_out	415	105	34	out	785000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+416	5280000.00	loan_give_out	416	106	72	out	5280000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+417	4782000.00	loan_give_out	417	107	80	out	4782000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+418	340000.00	loan_give_out	418	108	29	out	340000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+419	1393000.00	loan_give_out	419	109	11	out	1393000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+420	1207000.00	loan_give_out	420	110	45	out	1207000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+421	4918000.00	loan_give_out	421	104	14	out	4918000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+422	4527000.00	loan_give_out	422	105	53	out	4527000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+423	8638000.00	loan_give_out	423	106	19	out	8638000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+424	2782000.00	loan_give_out	424	107	62	out	2782000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+425	3193000.00	loan_give_out	425	108	43	out	3193000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+426	7983000.00	loan_give_out	426	109	92	out	7983000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+427	7561000.00	loan_give_out	427	110	89	out	7561000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+428	7456000.00	loan_give_out	428	104	35	out	7456000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+429	7153000.00	loan_give_out	429	105	71	out	7153000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+430	9827000.00	loan_give_out	430	106	46	out	9827000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+431	3802000.00	loan_give_out	431	107	70	out	3802000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+432	6746000.00	loan_give_out	432	108	75	out	6746000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+433	3211000.00	loan_give_out	433	109	67	out	3211000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+434	4183000.00	loan_give_out	434	110	56	out	4183000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+435	2366000.00	loan_give_out	435	104	55	out	2366000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+436	3167000.00	loan_give_out	436	105	13	out	3167000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+437	8100000.00	loan_give_out	437	106	93	out	8100000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+438	2372000.00	loan_give_out	438	107	62	out	2372000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+439	4499000.00	loan_give_out	439	108	77	out	4499000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+440	7336000.00	loan_give_out	440	109	9	out	7336000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+441	8752000.00	loan_give_out	441	110	69	out	8752000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+442	9181000.00	loan_give_out	442	104	100	out	9181000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+443	4490000.00	loan_give_out	443	105	10	out	4490000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+444	8075000.00	loan_give_out	444	106	94	out	8075000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+445	7390000.00	loan_give_out	445	107	61	out	7390000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+446	4052000.00	loan_give_out	446	108	5	out	4052000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+447	7247000.00	loan_give_out	447	109	81	out	7247000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+448	8257000.00	loan_give_out	448	110	85	out	8257000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+449	2181000.00	loan_give_out	449	104	59	out	2181000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+450	6860000.00	loan_give_out	450	105	73	out	6860000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+451	9283000.00	loan_give_out	451	106	29	out	9283000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+452	6527000.00	loan_give_out	452	107	81	out	6527000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+453	4154000.00	loan_give_out	453	108	83	out	4154000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+454	7892000.00	loan_give_out	454	109	39	out	7892000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+455	9261000.00	loan_give_out	455	110	93	out	9261000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+456	1912000.00	loan_give_out	456	104	9	out	1912000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+457	853000.00	loan_give_out	457	105	84	out	853000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+458	5952000.00	loan_give_out	458	106	93	out	5952000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+459	7334000.00	loan_give_out	459	107	1	out	7334000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+460	2477000.00	loan_give_out	460	108	41	out	2477000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+461	426000.00	loan_give_out	461	109	57	out	426000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+462	767000.00	loan_give_out	462	110	92	out	767000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+463	2772000.00	loan_give_out	463	104	40	out	2772000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+464	6998000.00	loan_give_out	464	105	6	out	6998000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+465	2402000.00	loan_give_out	465	106	32	out	2402000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+466	3068000.00	loan_give_out	466	107	88	out	3068000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+467	7040000.00	loan_give_out	467	108	58	out	7040000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+468	9538000.00	loan_give_out	468	109	73	out	9538000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+469	9308000.00	loan_give_out	469	110	19	out	9308000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+470	9587000.00	loan_give_out	470	104	13	out	9587000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+471	9424000.00	loan_give_out	471	105	56	out	9424000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+472	311000.00	loan_give_out	472	106	17	out	311000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+473	7998000.00	loan_give_out	473	107	29	out	7998000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+474	4355000.00	loan_give_out	474	108	3	out	4355000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+475	5484000.00	loan_give_out	475	109	68	out	5484000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+476	9005000.00	loan_give_out	476	110	69	out	9005000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+477	6970000.00	loan_give_out	477	104	47	out	6970000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+478	2264000.00	loan_give_out	478	105	64	out	2264000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+479	8275000.00	loan_give_out	479	106	29	out	8275000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+480	4312000.00	loan_give_out	480	107	22	out	4312000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+481	1469000.00	loan_give_out	481	108	56	out	1469000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+482	6872000.00	loan_give_out	482	109	98	out	6872000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+483	28000.00	loan_give_out	483	110	74	out	28000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+484	6278000.00	loan_give_out	484	104	37	out	6278000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+485	2667000.00	loan_give_out	485	105	100	out	2667000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+486	6545000.00	loan_give_out	486	106	78	out	6545000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+487	7404000.00	loan_give_out	487	107	3	out	7404000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+488	5194000.00	loan_give_out	488	108	20	out	5194000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+489	3094000.00	loan_give_out	489	109	57	out	3094000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+490	9578000.00	loan_give_out	490	110	65	out	9578000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+491	9756000.00	loan_give_out	491	104	21	out	9756000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+492	4940000.00	loan_give_out	492	105	42	out	4940000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+493	1395000.00	loan_give_out	493	106	67	out	1395000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+494	1561000.00	loan_give_out	494	107	66	out	1561000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+495	4411000.00	loan_give_out	495	108	11	out	4411000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+496	1837000.00	loan_give_out	496	109	2	out	1837000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+497	6546000.00	loan_give_out	497	110	64	out	6546000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+498	1929000.00	loan_give_out	498	104	84	out	1929000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+499	8394000.00	loan_give_out	499	105	37	out	8394000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+500	7865000.00	loan_give_out	500	106	10	out	7865000.00	2025-04-02 15:25:14.506954+02	2025-04-02 15:25:14.506954+02
+501	52704.00	loan_interest_payment	9	\N	24	in	2196000.00	2025-04-02 15:49:51.983261+02	2025-04-02 15:49:51.983261+02
+502	2196000.00	loan_principle_payment	9	\N	24	in	0.00	2025-04-02 15:49:51.983261+02	2025-04-02 15:49:51.983261+02
+507	0.00	loan_interest_payment	14	\N	33	in	3000000.00	2025-04-02 16:07:36.550128+02	2025-04-02 16:07:36.550128+02
+508	11162000.00	loan_principle_payment	14	\N	33	in	-8162000.00	2025-04-02 16:07:36.550128+02	2025-04-02 16:07:36.550128+02
+510	1000.00	loan_principle_payment	1	101	3	in	1820000.00	2025-04-02 19:32:18.319761+02	2025-04-02 19:32:18.319761+02
+513	18000.00	loan_principle_payment	1	101	3	in	1800000.00	2025-04-02 19:40:21.890387+02	2025-04-02 19:40:21.890387+02
+503	127170.00	loan_interest_payment	10	\N	91	in	2826000.00	2025-04-02 16:01:41.460797+02	2025-04-02 16:01:41.460797+02
+504	1826000.00	loan_principle_payment	10	\N	91	in	1000000.00	2025-04-02 16:01:41.460797+02	2025-04-02 16:01:41.460797+02
+511	1000.00	loan_principle_payment	1	101	3	in	1820000.00	2025-04-02 19:36:29.434785+02	2025-04-02 19:36:29.434785+02
+505	220374.00	loan_interest_payment	14	\N	33	in	8162000.00	2025-04-02 16:06:05.764338+02	2025-04-02 16:06:05.764338+02
+506	5162000.00	loan_principle_payment	14	\N	33	in	3000000.00	2025-04-02 16:06:05.764338+02	2025-04-02 16:06:05.764338+02
+512	2000.00	loan_principle_payment	1	101	3	in	1818000.00	2025-04-02 19:39:48.081853+02	2025-04-02 19:39:48.081853+02
+\.
+
+
+--
+-- TOC entry 4992 (class 0 OID 16432)
+-- Dependencies: 218
+-- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: -
+--
+
+COPY public.users (id, role, phone_number, email, password_hash, created_at, updated_at) FROM stdin;
+1	customer	+7 567280603	wayars0@google.com	$2a$04$ZTcPdp5u3FhndwmjDdpsS.Vjloji8z2RuJGt4u/VakRV5afFtDjiG	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+2	customer	+62 382788591	dwiggett1@t-online.de	$2a$04$D21wlO4gEtTMutLfhhLAd.IdgbjVhVBPXX4qReVojNSA3oAinJ3Ba	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+3	customer	+86 454589233	enavein2@cbsnews.com	$2a$04$2kW01iY319YJ2OTdbyQkbOIjNmk9mpvXNRqV8kJGFtxKko7E1L0mK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+4	customer	+234 208401294	lstorres3@over-blog.com	$2a$04$aRn5YdTgfhGIQ2OiiQl2cuctCGrot8YnqA/kW6a0MzkJNJU8eT2h6	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+5	customer	+62 16186014	\N	$2a$04$3SNGn5KFFfiKBfk6m0TtyueJFgotAiOs.6BwbLFy53EGoEgQu0x5m	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+6	customer	+51 91091281	ikeedy5@apache.org	$2a$04$nTDi1GwULEQy80Es2qqKCOZF3MVFtXRZNwFnhDm6FwOLGV.Cf4gjK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+7	customer	+355 623338547	vtomich6@51.la	$2a$04$DIxQ2oy/DCWYhGQbeFgH0OhiZ3XgdgDa5qm14eryjvgFb75qPPLWO	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+8	customer	+86 95566653	tantonijevic7@google.cn	$2a$04$rw3lu8WiMm9qA8nopyJZbOfGY6LZ1CG6/FhpdFHHpFFBnpcuUPmNi	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+9	customer	+86 164496806	bfrean8@unc.edu	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+10	customer	+7 631249555	kgisburn9@tinyurl.com	$2a$04$KufsDy8rj77s9ROFwMTheOhypVli5KWvNOx0SvQ9IQj5DVLGxgjbW	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+11	customer	+64 740999169	pletchera@scientificamerican.com	$2a$04$DuQj6py2qIvlxFXRjwqNxO74frAQIxf57kwjPCOgQG/B32Wakh3la	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+12	customer	+48 635672931	vwilsteadb@cbc.ca	$2a$04$OyLcaesQYN25FrC3QDOAk.cShlEMlbwFxnayHEA9H1GcCecfQujna	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+13	customer	+62 69836377	ftitchardc@ucsd.edu	$2a$04$D2LZCppbV/m78z.0AeOBGujI9BRGm4D1cCinxBJZLykgPK4HSOWCS	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+14	customer	+54 696992956	dpiffordd@nature.com	$2a$04$Ooyv14G5Xr9R1bM2oM0dGe8F/beh8x4Hmt6VOk2v6W8xjS0pik.ii	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+15	customer	+55 957792240	\N	$2a$04$WLevb/SgT0wX7PUG5nHncuTnsjhA4utqJMd/2EkKug4/53Q2EGlJe	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+16	customer	+86 482140655	\N	$2a$04$urVEBLNxmDfrZY/7sfXDOOJMlFC1rKPGI8dnuV4p0VdaqXzp9uEle	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+17	customer	+7 870416441	nmccartyg@amazon.co.uk	$2a$04$XIbTqYIcTyjuk4mjR1Y.AuxxpfokVjXWdwHSHb25D/y/kdl3LP5li	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+18	customer	+48 54449497	\N	$2a$04$0nYiYMNhepPAcT4ZzFRHsO9Sjm5RLpjSiSukiZtipf2DMFgcDnO.i	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+19	customer	+63 20289253	bcassellai@mashable.com	$2a$04$TgTRI5LLPDZeFtkx8KjGbeNbZMp0XU7mZrQrElhmiysGDYtoN3equ	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+20	customer	+86 723543679	bhealingsj@mayoclinic.com	$2a$04$gpwTnF9BKltUySH/zFwjlOCQlxvbEUmtk3LSOYmisvt6.7ltpko.W	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+21	customer	+1 757470208	rfloresk@twitpic.com	$2a$04$MV3m28e4C1TumiYeYBKp/e31EhAXamFoL8vuXhTw9O4K3c5nyCkCu	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+22	customer	+351 379219132	tmetrickl@reverbnation.com	$2a$04$kdkiOKFv/6qxUPDjpgwyrOwi4miJB3sbX6meykfO3.eXmEAnCMqTK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+23	customer	+57 230363629	rdanetm@paginegialle.it	$2a$04$JaGDoFsQXqpR2rSb6e5bo.FUR9C6u1lK5xLR2UrhAB5HU1gqtPvfq	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+24	customer	+63 545845928	sjouhningn@aboutads.info	$2a$04$zltKy/HX0ZqYu0.AvTF8re7f6Fxfjce3B35a6byILxzTma70TwhRi	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+25	customer	+86 142625564	yrosleno@stumbleupon.com	$2a$04$88nzL4SCX9f4UTLaCReZpuEq1i7VqiRYZB52g15uIGaME5ZE1GdwK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+26	customer	+380 810259397	rdronp@cafepress.com	$2a$04$IIG7Ks7bHtLau/x9iBJGB.U3.nT/o2YAGTu0jsrEyfhC3g/7UJhcm	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+27	customer	+86 988274878	\N	$2a$04$VUvq1BWAIWPTm/5dY37sUe8BqrzKxd0T6iEc6KpmTOC7/e0V7ft5u	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+28	customer	+351 912787793	obreeser@dailymotion.com	$2a$04$F7kMWkwhUU2Y3fhFzBdrMuzLhZybWNLFO3GwIocqh2T8QLD6L6hwe	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+29	customer	+1 980735722	recclesalls@blogspot.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+30	customer	+86 313424418	\N	$2a$04$GDayDBlo7YJBnwG8BYpqru6mENVS2lUNclu64eonIKaGwjvz4YCkm	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+31	customer	+86 734522244	amacknessu@nasa.gov	$2a$04$xDJgnTyJ7q9nfne4Jv48Su3vHD7gZFfhSQjBGsZ4Xkx752VgVFluq	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+32	customer	+63 740719169	\N	$2a$04$afetRiv.86QF02nVz9G67ORhJPuKVJS5q.i3Uwcz3YzaClZRL9/N2	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+33	customer	+261 378964465	\N	$2a$04$fxVv5dYHlORIy0Q170Bfaud5HfNbG5FuvKgu5tLs4q1hqpQKDyF1a	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+34	customer	+86 882152894	\N	$2a$04$XH8Qno2S7ZDoPb70RJcMyu1YR9/MzZ9Z/PNc2qlA7rVVIHZmBqTOa	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+35	customer	+86 611975444	zfarringtony@people.com.cn	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+36	customer	+86 521295924	ccleghornz@weibo.com	$2a$04$lciNiTFKip37pCBPS7Ytx.iOhZDl/zMyNhD0xUQEv6FYPp5aVR7xy	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+37	customer	+86 264633870	ebote10@rambler.ru	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+38	customer	+62 338255475	mneasam11@barnesandnoble.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+39	customer	+7 347791169	epressnell12@live.com	$2a$04$WRb3uxDJxqMNYFTBK3quyOuF.Gq1TJuuoa3DQFojBNXFhluto24le	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+40	customer	+269 696184757	bwest13@skyrock.com	$2a$04$MqUu07PiV2fqDauCUwX28e7p69SdkCXs8bIGsr3amU.Bg0uPgyqni	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+41	customer	+1 559691900	acranch14@discovery.com	$2a$04$/EhZkJegIj9K78Lv5VBKCuSkJWFtvsYXrlosOVTIII33bbzPYmEX2	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+42	customer	+48 773956124	rcarlan15@jalbum.net	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+43	customer	+62 863786456	\N	$2a$04$HIDuARcyrRlOZ.OqnadVpu2cVoONXsCT5Pu23BI8.wO1kvTCUkttC	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+44	customer	+387 691516381	iainslie17@sitemeter.com	$2a$04$VSTEPCINfbJNxboD5fsXtersQ5UqfyrJG8w9dfLFmS9EcR.N4rEHm	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+45	customer	+383 308277526	dlesurf18@toplist.cz	$2a$04$olKDXgVgwzU22igxyt0sl.VjccZ5yH.0YCbo/re.db1os0IXzT5yC	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+46	customer	+81 251644950	bgolton19@hhs.gov	$2a$04$1qwUVGzCGlkuGw6plJxqheZLU8Oz9.fgsS15LsvZXJ6Rzowitm1Xm	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+47	customer	+66 202747866	mstainson1a@sogou.com	$2a$04$2a3UXbIsqLZPFZ0W2zM7TuLQwW17H1TekMF0xBVnoXvDHHh.l56lu	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+48	customer	+48 609969711	morred1b@newyorker.com	$2a$04$SbXd0TqaqmPmmkgzh4HtTuct.UQOCkj5jMzb60u4zcvi319NiCHZS	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+49	customer	+504 85597170	awarlton1c@tmall.com	$2a$04$LqxVd9UkWfQgcATJ5VWmjecKFp7CaQnJeMua8xbrdX3c3ZCU2zreC	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+50	customer	+54 983597722	ecaldero1d@mayoclinic.com	$2a$04$k0L.YT3W7HPfcMJUVhcoh.MIK006epOyL5HV8WYilB5rih76nlscC	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+51	customer	+48 564756381	wgallager1e@abc.net.au	$2a$04$juCRBH3GYOPapdLmkuqrIuw./Up7VNh7Ra9/fteiuCYCoEru1qB4C	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+52	customer	+55 588908632	jbillett1f@rambler.ru	$2a$04$db9fG0J20TlHLf4HGn3Lmu6Mv3kSuoijbDHnhdCObQyyaAf6xkYz6	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+53	customer	+86 402787572	nkuschek1g@youtube.com	$2a$04$FuKuD1Av6QcKC7vkPha5Tezri5SbjC1IjLTGaN7RSsN5NpUHhuFZO	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+54	customer	+299 776304727	ccartmale1h@php.net	$2a$04$L9LpwQ/KWevicDWVPjRNwea48x33QNHCfNAri4V5w8pWy0PqWkruu	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+55	customer	+62 748461363	jdeverock1i@sakura.ne.jp	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+56	customer	+62 136696414	\N	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+57	customer	+66 62636383	bditty1k@ow.ly	$2a$04$b3mbbQ8jhFeKbFG9bhmUcem1jCdCkpEnQ4MNop8oCNe6tdgHDgEMS	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+58	customer	+30 91596276	tgayden1l@altervista.org	$2a$04$xddPpVgGKDoXBguIiRD6eeud36RQoO9ZpCD0BbaGn8aeQrpeWkk/O	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+59	customer	+60 551556477	\N	$2a$04$uRGnDzDAq3OqBFUH2HICOe/aUPwvhPcUwsWuMRVWfNi29VdphTbDS	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+60	customer	+256 929512726	cquelch1n@google.ru	$2a$04$Fp9lHwvjwEIpzUWlFsRZ2OA32n5JFOPV5iEwvAyZ.EZwC7..6Ibzi	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+61	customer	+62 560169914	dleslie1o@goo.ne.jp	$2a$04$qfVBLeQA8HF5chX8Tlui/.QjWZx1G8rufbHnPJt5MDOuzrQtFUZAa	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+62	customer	+20 287613980	thamm1p@who.int	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+63	customer	+994 720357357	ceakeley1q@alibaba.com	$2a$04$YBhReRBy.sBvEkpTkUlgIuRi3BK9Tr1D/JVSMYnp9vrf1TBLssWDK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+64	customer	+86 403743743	\N	$2a$04$DRKcz4x088Aw9xMzGh0OSOukRfDSeTrGY1qawed.5SofYWk4DH3pK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+65	customer	+62 586830470	\N	$2a$04$Asa4NtsQDlUmFboAEah.DOX575OSfRfjtt4WgARwXevNAW4e6FFO.	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+66	customer	+86 816686314	fhodgins1t@usnews.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+67	customer	+970 34477192	tgerrit1u@home.pl	$2a$04$LoJkmT95giDeH51eRENe0eS8plt7jnv2pHfEyoSZPTHzc7EvJzova	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+68	customer	+86 422181584	ecraske1v@cloudflare.com	$2a$04$34plLG15CZRo5A8tfWpe1.zX.nsfHWwQmLjv0WWDBpo8WPVsupMuK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+69	customer	+63 275721911	dosheils1w@imageshack.us	$2a$04$7BFWB5g9.GyacOmyTRIpN.gCVVGhHXV250h0nxja7d/hKpRiWlFz.	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+70	customer	+86 250549790	\N	$2a$04$YYufFNF.SyxChlEB0c3yV.I6pVji94xYdK7Dsihon.XqOixFccDg2	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+71	customer	+967 144625928	tesslemont1y@mysql.com	$2a$04$XC4LiHTBlmfnz.oIQFhtwOBLWFODLPHYE0wVRzvq3IF7wju/DXl5e	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+72	customer	+86 979337927	tocurran1z@de.vu	$2a$04$USi4NX3NUVTBfo9agjXADO7vFkyOZpbCVRZDFisi1cC2tGnWczjZS	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+73	customer	+373 530450414	mpember20@omniture.com	$2a$04$DnUoIqxLQTXoolcUjiFv4eMJVE9zbukowqHB9q4h9JQFreOtkNdxC	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+74	customer	+86 370689196	pmcmechan21@cloudflare.com	$2a$04$q5/Vo7dGY/gvbMJSjyl7..La8vPPbOJXsU5WKvKNIhxGjhudKBh8S	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+75	customer	+593 206464578	hbartkiewicz22@about.com	$2a$04$WEmulNdX6uvwtey0VjDUC.Hqlq1IunwPZDKRX.zestg17qtgnLmPK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+76	customer	+7 636844544	krendall23@unc.edu	$2a$04$f7AmxeB6FVC03N1hHse2b.bIkEazRf52c.AYdrzxcA9K4s0n41xwa	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+77	customer	+62 225929460	atroke24@apple.com	$2a$04$iOCr1m6jlLzBpn.oWnf4Fu6UY2eW0BRBS4GCNAWoCasbFs54wb0ga	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+78	customer	+54 851582550	ssimpkin25@blogtalkradio.com	$2a$04$fq12gA0/216.Jcl380tZxuMDIShg1yJfwZ03NFFWTiD0JwiTIQiCi	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+79	customer	+351 403803796	clardez26@wordpress.org	$2a$04$qE2YMCQH3qnTrqHo/d/eHe0wF66ic.rc.T7RQIK3dSmgux5fo81S6	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+80	customer	+380 26387818	\N	$2a$04$Si72QaFTfO2mQ6YFT6KVz.AMD1ifx7RrVN9tTsF904t.Z1Wg9fIyO	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+81	customer	+86 529138925	\N	$2a$04$TIeA5GpiKTXfoDK55n3L7uboTWRsFySNUiZoFsS5oZMdV/gEZBOHK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+82	customer	+62 54866371	lgrafhom29@xinhuanet.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+83	customer	+63 84855297	\N	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+84	customer	+66 839451461	hsemper2b@drupal.org	$2a$04$b60A5qk8kr4lDS0oCmeVsODPlWlm56oQy/QCq4mzOMIafLyKLXSz.	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+85	customer	+54 750156635	vquartermaine2c@latimes.com	$2a$04$eixPXLtzykkR0v0oxodzaePA6y8DRGgYIsinmEQZ8lcvuHuG9Pg9.	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+86	customer	+86 822255860	jferreiro2d@google.co.jp	$2a$04$tDVViqCEonvMyjxE8r4i6ep5hjFe9VX3mBvxmYv.uq5xvbeumoL2i	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+87	customer	+7 724654932	rharvison2e@gnu.org	$2a$04$lGeR9P2.qVbcOnWs82T.DuRDWcgZFV/SKqyyXYal4cCfAQuU0MBX6	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+88	customer	+972 139209697	cirons2f@lulu.com	$2a$04$iDhFPJVm59a3f1dRLQMwRenZj.usBqsTS0xwB4HTpQ2yFEyToosFq	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+89	customer	+86 760583907	bhardesty2g@yandex.ru	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+90	customer	+33 255614416	pcraster2h@homestead.com	$2a$04$vgX2fAcX7g1bPmJTZNi7WOL0jeF/ky6Nf5I2v0drK14iaSYmcM85u	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+91	customer	+351 238121739	ashadwick2i@ask.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+92	customer	+48 400565826	\N	$2a$04$1hJCRvwCOwyYp7lW1ikzmeUXLzt49tl31jf17pd/ADT5VJ.crewPm	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+93	customer	+54 376614730	fdorgan2k@yahoo.co.jp	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+94	customer	+51 730229628	\N	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+95	customer	+81 690849320	sgodsal2m@studiopress.com	$2a$04$amz8VXkFmkW2YIR/k5eYB.g5QLVfIUvGVqAnw7Xao2dNeqUBYJf96	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+96	customer	+358 808837238	\N	$2a$04$aJk3USLDNmCs4ZePcYMvt.nX6GCcmP0xh55RkMW7pjqsUQmajXrBO	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+97	customer	+86 713639342	ilorentzen2o@archive.org	$2a$04$y2uTGQ9WzxBmz5QDljx2qOsOcC4GJTcaUaOzs0s2NWyZywDwvKVeu	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+98	customer	+7 969169417	eodoireidh2p@devhub.com	$2a$04$hW6liLv2woZwYQxPO1Pdou8vt/g1ooVEcxsIJ34auF75FYpmVRKFa	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+99	customer	+7 858577486	misham2q@amazon.co.uk	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+100	customer	+62 861148540	\N	$2a$04$gsnFd14sKcI54k4Qh3AAPuvDtGQC/nnMq/EvJuFg7lz34Z80bFo56	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+101	employee	+86 475982858	fhatherleigh2s@paginegialle.it	$2a$04$jdEjChK.PtMufMsQDp/t..zt2XLSfzWRGbigZWggVUBW92jwB93Be	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+102	employee	+62 407582860	rbraid2t@va.gov	$2a$04$WOjjPUsqBXWuzVPq.HXDQ.NlxAyXz3fR5JuZDsCpO1FvQXG3/iCa6	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+103	employee	+352 853884836	jwenban2u@biblegateway.com	$2a$04$OIoWNS2NZoMe11D75NXn0ODP6HLbcwyRSRxEuBmX4ILeCjibC4xym	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+104	employee	+7 56768414	gmacauley2v@ft.com	$2a$04$DEbkv/JuPlRBmh/TqDJX9.l9t8dKmmYSjG8RTmdAh0RtnTDt2UyGi	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+105	employee	+27 236594176	jsimester2w@deliciousdays.com	$2a$04$7TPdutCZVDzFeJvnbrFkS.wxX66P..00x5OrxoaTTgOoMnePVIpei	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+106	employee	+33 167673731	sfarfalameev2x@unblog.fr	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+107	employee	+86 792190294	\N	$2a$04$bgn5/c2xWVzQPUYb9OaW2uuECRSAg3pk9g.bAqeVawNss2qK3D9hK	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+108	employee	+62 633318157	lwolland2z@oracle.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+109	employee	+86 963475853	coxlee30@illinois.edu	$2a$04$2vDguvng1RPltkHAQphqsO36RZbGb.hURlpeJNV3IDs1LmrIxdkLa	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+110	employee	+7 617431114	dkidner31@ted.com	\N	2025-03-29 11:06:53.816772+01	2025-03-29 11:06:53.816772+01
+113	employee	+12 34567890	john.doe@example.com	$2b$10$3mALVrQNUJ9vZPxrFL3mWe.Q/.6e48r2HdMYlrmZnsVoSZ8UxbV.m	2025-04-02 18:10:02.93638+02	2025-04-02 18:10:02.93638+02
+115	employee	+12 44567890	john.doe@exampl.com	$2b$10$6uYTrNw9nmcEcG9Mocj.uuij9i4P/CJBy8o1zYmQjs5qF7u1bNSHe	2025-04-02 18:11:54.653436+02	2025-04-02 18:11:54.653436+02
+116	employee	+12 344567890	john.doe@exampm.com	$2b$10$4cKJYGxSJ6cgpS3NGls.au8wT9NhNz81HPRevUagmMgF/WZ5wLnfa	2025-04-02 18:14:00.193868+02	2025-04-02 18:14:00.193868+02
+117	customer	+12 3456788	john.doe@exaple.com	$2b$10$6KffZNV.oYhqzJKbNkBzU.aLHdv/JAICinxLd1oOTnIO5uX9CIbLa	2025-04-02 18:23:48.535793+02	2025-04-02 18:23:48.535793+02
+111	admin	+31 615957803	tseka.nice@gmail.com	$2b$10$R5ATTaxDgQaWHG4smOPj4.R543BWmyeYQw2lvaofSHw6qb8ChyAWO	2025-03-29 11:06:53.816772+01	2025-04-03 21:21:24.335016+02
+118	customer	+31 87654321	\N	$2b$10$KlNZ6eih5pSjJng6WbVEaOXLCeDdq5NPYFHWfxHJqKuUf9wAk0ly2	2025-04-05 09:33:10.664457+02	2025-04-05 09:33:10.664457+02
+119	customer	+31 11111111	\N	$2b$10$slgZYPPUppbpTYHEmLkjLOB/a6NQWRrL/35Fj6F9n9KyiXf1n.7VW	2025-04-05 11:35:32.388889+02	2025-04-05 11:35:32.388889+02
+\.
+
+
+--
+-- TOC entry 5007 (class 0 OID 0)
+-- Dependencies: 221
+-- Name: loans_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
+--
+
+SELECT pg_catalog.setval('public.loans_id_seq', 502, true);
+
+
+--
+-- TOC entry 5008 (class 0 OID 0)
+-- Dependencies: 224
+-- Name: transactions_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
+--
+
+SELECT pg_catalog.setval('public.transactions_id_seq', 513, true);
+
+
+--
+-- TOC entry 5009 (class 0 OID 0)
+-- Dependencies: 217
+-- Name: users_id_seq; Type: SEQUENCE SET; Schema: public; Owner: -
+--
+
+SELECT pg_catalog.setval('public.users_id_seq', 119, true);
+
+
+--
+-- TOC entry 4823 (class 2606 OID 16498)
+-- Name: customers customers_citizen_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customers
+    ADD CONSTRAINT customers_citizen_id_key UNIQUE (social_security_number);
+
+
+--
+-- TOC entry 4825 (class 2606 OID 16484)
+-- Name: customers customers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customers
+    ADD CONSTRAINT customers_pkey PRIMARY KEY (user_id);
+
+
+--
+-- TOC entry 4821 (class 2606 OID 16463)
+-- Name: employees employees_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_pkey PRIMARY KEY (user_id);
+
+
+--
+-- TOC entry 4827 (class 2606 OID 16565)
+-- Name: loans loans_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loans
+    ADD CONSTRAINT loans_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 4829 (class 2606 OID 16635)
+-- Name: transactions transactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 4815 (class 2606 OID 16445)
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+
+--
+-- TOC entry 4817 (class 2606 OID 16443)
+-- Name: users users_phone_number_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_phone_number_key UNIQUE (phone_number);
+
+
+--
+-- TOC entry 4819 (class 2606 OID 16441)
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- TOC entry 4839 (class 2620 OID 16571)
+-- Name: loans calculate_loan_dates_trigger; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER calculate_loan_dates_trigger BEFORE INSERT OR UPDATE ON public.loans FOR EACH ROW EXECUTE FUNCTION public.calculate_loan_dates();
+
+
+--
+-- TOC entry 4841 (class 2620 OID 16651)
+-- Name: transactions derive_transaction_direction_trigger; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER derive_transaction_direction_trigger BEFORE INSERT OR UPDATE ON public.transactions FOR EACH ROW EXECUTE FUNCTION public.derive_transaction_direction();
+
+
+--
+-- TOC entry 4838 (class 2620 OID 16492)
+-- Name: customers update_customers_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_customers_updated_at BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- TOC entry 4837 (class 2620 OID 16469)
+-- Name: employees update_employees_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_employees_updated_at BEFORE UPDATE ON public.employees FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- TOC entry 4840 (class 2620 OID 16572)
+-- Name: loans update_loans_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_loans_updated_at BEFORE UPDATE ON public.loans FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- TOC entry 4842 (class 2620 OID 16652)
+-- Name: transactions update_transactions_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_transactions_updated_at BEFORE UPDATE ON public.transactions FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- TOC entry 4836 (class 2620 OID 16446)
+-- Name: users update_users_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- TOC entry 4831 (class 2606 OID 16487)
+-- Name: customers customers_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customers
+    ADD CONSTRAINT customers_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- TOC entry 4830 (class 2606 OID 16464)
+-- Name: employees employees_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- TOC entry 4832 (class 2606 OID 16566)
+-- Name: loans loans_customer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loans
+    ADD CONSTRAINT loans_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(user_id);
+
+
+--
+-- TOC entry 4833 (class 2606 OID 16646)
+-- Name: transactions transactions_customer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(user_id);
+
+
+--
+-- TOC entry 4834 (class 2606 OID 16641)
+-- Name: transactions transactions_employee_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_employee_id_fkey FOREIGN KEY (employee_id) REFERENCES public.employees(user_id);
+
+
+--
+-- TOC entry 4835 (class 2606 OID 16636)
+-- Name: transactions transactions_loan_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.transactions
+    ADD CONSTRAINT transactions_loan_id_fkey FOREIGN KEY (loan_id) REFERENCES public.loans(id);
+
+
+-- Completed on 2025-04-05 15:20:55
+
+--
+-- PostgreSQL database dump complete
+--
+
