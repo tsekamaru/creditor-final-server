@@ -33,19 +33,20 @@
             </div>
           </div>
           <div class="flex items-center space-x-4">
-            {{#if currentUser}}
-              <span class="text-gray-700">Welcome, {{currentUser.role}}</span>
-              <a href="/auth/logout" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors">
-                Logout
-              </a>
-            {{else}}
+            <div id="authButtons">
               <a href="/auth/login" class="text-gray-500 hover:text-gray-700 px-3 py-2 rounded-md text-sm font-medium transition-colors">
                 Login
               </a>
               <a href="/auth/signup" class="bg-primary hover:bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors">
                 Sign Up
               </a>
-            {{/if}}
+            </div>
+            <div id="userInfo" class="hidden">
+              <span id="userRole" class="text-gray-700"></span>
+              <button onclick="handleLogout()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors">
+                Logout
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -68,6 +69,30 @@
     <script>
       // Add current year to footer
       document.querySelector('footer p').textContent = document.querySelector('footer p').textContent.replace('{{currentYear}}', new Date().getFullYear());
+
+      // Check for JWT token in localStorage
+      function checkAuthStatus() {
+        const token = localStorage.getItem('token');
+        const userInfo = localStorage.getItem('user');
+        
+        if (token && userInfo) {
+          const user = JSON.parse(userInfo);
+          document.getElementById('authButtons').classList.add('hidden');
+          document.getElementById('userInfo').classList.remove('hidden');
+          document.getElementById('userRole').textContent = `Welcome, ${user.role}`;
+        } else {
+          document.getElementById('authButtons').classList.remove('hidden');
+          document.getElementById('userInfo').classList.add('hidden');
+        }
+      }
+
+      // Handle logout
+      function handleLogout() {
+        window.location.href = '/auth/logout';
+      }
+
+      // Check auth status on page load
+      checkAuthStatus();
     </script>
   </body>
 </html>

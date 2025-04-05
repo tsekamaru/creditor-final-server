@@ -2,18 +2,27 @@
 const express = require("express");                // Express framework
 const dotenv = require("dotenv");                 // Environment variables
 const hbs = require("hbs");                       // Handlebars view engine
+const cors = require('cors');
+const cookieParser = require('cookie-parser');
 
 // ℹ️ Core functionality imports
 const db = require("./db/index");                 // Database connection
 const config = require("./config/index");         // Application configuration
-const errorHandler = require("./error-handling/index");  // Error handling
+const { errorHandler, notFoundHandler } = require('./error-handling');
 
 // Initialize environment variables
 dotenv.config();
 
 // Create and configure Express application
 const app = express();
+
+// Basic configuration
 config(app);
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(cookieParser());
 
 // ℹ️ Route imports
 const index = require("./routes/index.routes");
@@ -42,6 +51,7 @@ db.connect()
     });
 
 // Error handling
+app.use(notFoundHandler);
 app.use(errorHandler);
 
 module.exports = app;

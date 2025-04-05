@@ -5,7 +5,7 @@
         Sign in to your account
       </h2>
     </div>
-    <form class="mt-8 space-y-6" action="/auth/login" method="POST" onsubmit="return validateAndFormatPhone()">
+    <form class="mt-8 space-y-6" id="loginForm">
       <div class="rounded-md shadow-sm -space-y-px">
         <!-- Phone Number -->
         <div class="mb-4">
@@ -43,15 +43,13 @@
         </button>
       </div>
 
-      {{#if errorMessage}}
-        <div class="rounded-md bg-red-50 p-4">
-          <div class="flex">
-            <div class="ml-3">
-              <h3 class="text-sm font-medium text-red-800">{{errorMessage}}</h3>
-            </div>
+      <div id="errorMessage" class="hidden rounded-md bg-red-50 p-4">
+        <div class="flex">
+          <div class="ml-3">
+            <h3 class="text-sm font-medium text-red-800"></h3>
           </div>
         </div>
-      {{/if}}
+      </div>
     </form>
 
     <div class="text-center">
@@ -82,17 +80,7 @@
       return false;
     }
 
-    // Format the phone number exactly as expected by the backend
-    const phone_number = `${countryCode} ${phoneNumber}`;
-    
-    // Create a hidden input to send the formatted phone number
-    const hiddenInput = document.createElement('input');
-    hiddenInput.type = 'hidden';
-    hiddenInput.name = 'phone_number';  // This must match the backend parameter name
-    hiddenInput.value = phone_number;   // Using the same variable name as backend
-    document.querySelector('form').appendChild(hiddenInput);
-    
-    return true;
+    return `${countryCode} ${phoneNumber}`;
   }
 
   // Prevent non-numeric input in phone number field
@@ -106,6 +94,45 @@
       this.value = '+' + this.value.replace(/[^0-9]/g, '');
     } else {
       this.value = '+' + this.value.slice(1).replace(/[^0-9]/g, '');
+    }
+  });
+
+  // Handle form submission
+  document.getElementById('loginForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const phone_number = validateAndFormatPhone();
+    const password = document.getElementById('password').value;
+
+    try {
+      const response = await fetch('/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phone_number, password }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        // Store token and user info
+        localStorage.setItem('token', data.token);
+        localStorage.setItem('user', JSON.stringify(data.user));
+        
+        // Redirect to home page
+        window.location.href = '/';
+      } else {
+        // Show error message
+        const errorDiv = document.getElementById('errorMessage');
+        errorDiv.classList.remove('hidden');
+        errorDiv.querySelector('h3').textContent = data.message;
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      const errorDiv = document.getElementById('errorMessage');
+      errorDiv.classList.remove('hidden');
+      errorDiv.querySelector('h3').textContent = 'An error occurred during login.';
     }
   });
 </script>

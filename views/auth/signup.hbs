@@ -8,14 +8,26 @@
         Step 1: Verify your phone number
       </p>
     </div>
-    <form class="mt-8 space-y-6" action="/auth/signup" method="POST">
+    <form class="mt-8 space-y-6" id="signupForm">
       <div class="rounded-md shadow-sm -space-y-px">
         <!-- Phone Number -->
         <div class="mb-4">
-          <label for="phone_number" class="block text-sm font-medium text-gray-700">Phone number</label>
-          <input id="phone_number" name="phone_number" type="tel" autocomplete="tel" required
-            class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
-            placeholder="Enter your phone number">
+          <label class="block text-sm font-medium text-gray-700">Phone number</label>
+          <div class="flex space-x-2">
+            <!-- Country Code -->
+            <div class="w-24">
+              <input id="countryCode" name="countryCode" type="text" required
+                class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
+                placeholder="+31" value="+31" maxlength="4">
+            </div>
+            <!-- Phone Number -->
+            <div class="flex-1">
+              <input id="phoneNumber" name="phoneNumber" type="tel" required
+                class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
+                placeholder="615957803" pattern="[0-9]{8,}" title="Phone number must be at least 8 digits">
+            </div>
+          </div>
+          <p class="mt-1 text-sm text-gray-500">Enter your phone number (minimum 8 digits)</p>
         </div>
 
         <!-- OTP Verification -->
@@ -40,15 +52,13 @@
         </button>
       </div>
 
-      {{#if errorMessage}}
-        <div class="rounded-md bg-red-50 p-4">
-          <div class="flex">
-            <div class="ml-3">
-              <h3 class="text-sm font-medium text-red-800">{{errorMessage}}</h3>
-            </div>
+      <div id="errorMessage" class="hidden rounded-md bg-red-50 p-4">
+        <div class="flex">
+          <div class="ml-3">
+            <h3 class="text-sm font-medium text-red-800"></h3>
           </div>
         </div>
-      {{/if}}
+      </div>
     </form>
 
     <div class="text-center">
@@ -63,19 +73,49 @@
 </div>
 
 <script>
-  function requestOTP() {
-    const phoneNumber = document.getElementById('phone_number').value;
-    if (!phoneNumber) {
-      alert('Please enter a phone number first');
-      return;
+  function validateAndFormatPhone() {
+    const countryCode = document.getElementById('countryCode').value.trim();
+    const phoneNumber = document.getElementById('phoneNumber').value.trim();
+    
+    // Validate country code format
+    if (!countryCode.startsWith('+')) {
+      alert('Country code must start with +');
+      return false;
     }
-    // Here you would make an API call to request OTP
+
+    // Validate phone number length
+    if (phoneNumber.length < 8) {
+      alert('Phone number must be at least 8 digits');
+      return false;
+    }
+
+    return `${countryCode} ${phoneNumber}`;
+  }
+
+  // Prevent non-numeric input in phone number field
+  document.getElementById('phoneNumber').addEventListener('input', function(e) {
+    this.value = this.value.replace(/[^0-9]/g, '');
+  });
+
+  // Ensure country code starts with +
+  document.getElementById('countryCode').addEventListener('input', function(e) {
+    if (!this.value.startsWith('+')) {
+      this.value = '+' + this.value.replace(/[^0-9]/g, '');
+    } else {
+      this.value = '+' + this.value.slice(1).replace(/[^0-9]/g, '');
+    }
+  });
+
+  function requestOTP() {
+    const phone_number = validateAndFormatPhone();
+    if (!phone_number) return;
+
     fetch('/auth/request-otp', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ phone: phoneNumber }),
+      body: JSON.stringify({ phone: phone_number }),
     })
     .then(response => response.json())
     .then(data => {
@@ -90,4 +130,41 @@
       alert('Failed to send verification code');
     });
   }
+
+  // Handle form submission
+  document.getElementById('signupForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    
+    const phone_number = validateAndFormatPhone();
+    const otp = document.getElementById('otp').value;
+
+    try {
+      const response = await fetch('/auth/signup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phone_number, otp }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        // Store phone number for password creation
+        localStorage.setItem('verifiedPhone', phone_number);
+        // Redirect to password creation
+        window.location.href = '/auth/create-password';
+      } else {
+        // Show error message
+        const errorDiv = document.getElementById('errorMessage');
+        errorDiv.classList.remove('hidden');
+        errorDiv.querySelector('h3').textContent = data.message;
+      }
+    } catch (error) {
+      console.error('Error:', error);
+      const errorDiv = document.getElementById('errorMessage');
+      errorDiv.classList.remove('hidden');
+      errorDiv.querySelector('h3').textContent = 'An error occurred during signup.';
+    }
+  });
 </script>

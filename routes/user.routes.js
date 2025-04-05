@@ -3,31 +3,32 @@ const router = express.Router();
 const db = require('../db');
 const bcrypt = require('bcrypt');
 const saltRounds = 10;
-
-// Middleware
-const isLoggedIn = require('../middleware/isLoggedIn');
-const isAdmin = require('../middleware/isAdmin');
+const { verifyToken, isAdmin } = require('../middleware/jwtAuth');
 
 // GET /api/users - Get all users (Admin only)
-router.get('/', isLoggedIn, isAdmin, async (req, res, next) => {
+router.get('/', verifyToken, isAdmin, async (req, res, next) => {
     try {
         const result = await db.query(
             'SELECT id, role, phone_number, email, created_at, updated_at FROM users ORDER BY created_at DESC'
         );
-        res.json(result.rows);
+        res.json({
+            success: true,
+            users: result.rows
+        });
     } catch (error) {
         next(error);
     }
 });
 
 // POST /api/users - Create new user (Admin only)
-router.post('/', isLoggedIn, isAdmin, async (req, res, next) => {
+router.post('/', verifyToken, isAdmin, async (req, res, next) => {
     try {
         const { role, phone_number, email, password } = req.body;
 
         // Validation - email is optional
         if (!role || !phone_number || !password) {
             return res.status(400).json({
+                success: false,
                 message: 'Role, phone number, and password are required.'
             });
         }
@@ -40,6 +41,7 @@ router.post('/', isLoggedIn, isAdmin, async (req, res, next) => {
 
         if (phoneCheck.rows.length > 0) {
             return res.status(400).json({
+                success: false,
                 message: 'Phone number already exists.'
             });
         }
@@ -53,6 +55,7 @@ router.post('/', isLoggedIn, isAdmin, async (req, res, next) => {
 
             if (emailCheck.rows.length > 0) {
                 return res.status(400).json({
+                    success: false,
                     message: 'Email already exists.'
                 });
             }
@@ -65,24 +68,28 @@ router.post('/', isLoggedIn, isAdmin, async (req, res, next) => {
         // Create user
         const result = await db.query(
             `INSERT INTO users 
-             (role, phone_number, email, password) 
+             (role, phone_number, email, password_hash) 
              VALUES ($1, $2, $3, $4) 
              RETURNING id, role, phone_number, email, created_at, updated_at`,
             [role, phone_number, email || null, hashedPassword]
         );
 
-        res.status(201).json(result.rows[0]);
+        res.status(201).json({
+            success: true,
+            user: result.rows[0]
+        });
     } catch (error) {
         next(error);
     }
 });
 
 // GET /api/users/:id - Get single user
-router.get('/:id', isLoggedIn, async (req, res, next) => {
+router.get('/:id', verifyToken, async (req, res, next) => {
     try {
         // Users can only view their own profile unless they're admin
         if (req.user.id !== parseInt(req.params.id) && req.user.role !== 'admin') {
             return res.status(403).json({ 
+                success: false,
                 message: 'Access denied. You can only view your own profile.' 
             });
         }
@@ -93,21 +100,28 @@ router.get('/:id', isLoggedIn, async (req, res, next) => {
         );
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
         }
 
-        res.json(result.rows[0]);
+        res.json({
+            success: true,
+            user: result.rows[0]
+        });
     } catch (error) {
         next(error);
     }
 });
 
 // PUT /api/users/:id - Update user
-router.put('/:id', isLoggedIn, async (req, res, next) => {
+router.put('/:id', verifyToken, async (req, res, next) => {
     try {
         // Users can only update their own profile unless they're admin
         if (req.user.id !== parseInt(req.params.id) && req.user.role !== 'admin') {
             return res.status(403).json({ 
+                success: false,
                 message: 'Access denied. You can only update your own profile.' 
             });
         }
@@ -117,6 +131,7 @@ router.put('/:id', isLoggedIn, async (req, res, next) => {
         // Basic validation - only phone number is required
         if (!phone_number) {
             return res.status(400).json({ 
+                success: false,
                 message: 'Phone number is required.' 
             });
         }
@@ -130,6 +145,7 @@ router.put('/:id', isLoggedIn, async (req, res, next) => {
 
             if (emailCheck.rows.length > 0) {
                 return res.status(400).json({ 
+                    success: false,
                     message: 'Email already exists for another user.' 
                 });
             }
@@ -144,17 +160,23 @@ router.put('/:id', isLoggedIn, async (req, res, next) => {
         );
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
         }
 
-        res.json(result.rows[0]);
+        res.json({
+            success: true,
+            user: result.rows[0]
+        });
     } catch (error) {
         next(error);
     }
 });
 
 // DELETE /api/users/:id - Delete user (Admin only)
-router.delete('/:id', isLoggedIn, isAdmin, async (req, res, next) => {
+router.delete('/:id', verifyToken, isAdmin, async (req, res, next) => {
     try {
         const result = await db.query(
             'DELETE FROM users WHERE id = $1 RETURNING id, role, phone_number, email, created_at, updated_at',
@@ -162,10 +184,17 @@ router.delete('/:id', isLoggedIn, isAdmin, async (req, res, next) => {
         );
 
         if (result.rows.length === 0) {
-            return res.status(404).json({ message: 'User not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'User not found' 
+            });
         }
 
-        res.json({ message: 'User deleted successfully', user: result.rows[0] });
+        res.json({ 
+            success: true,
+            message: 'User deleted successfully',
+            user: result.rows[0]
+        });
     } catch (error) {
         next(error);
     }
