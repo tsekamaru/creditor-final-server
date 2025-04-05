@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 
 // Error handling for server startup
 const server = app.listen(PORT, () => {
-    console.log(`Server listening on http://localhost:${PORT}`);
+    console.log(`Server is running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV}`);
 }).on('error', (err) => {
     if (err.code === 'EADDRINUSE') {

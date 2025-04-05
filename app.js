@@ -24,6 +24,9 @@ app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
 
+// Handle favicon requests with 204 No Content
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 // ℹ️ Route imports
 const index = require("./routes/index.routes");
 const authRoutes = require("./routes/auth.routes");
