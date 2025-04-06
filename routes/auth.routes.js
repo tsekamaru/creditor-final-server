@@ -240,4 +240,78 @@ router.get("/validate-token", verifyToken, (req, res) => {
   });
 });
 
+// POST /auth/change-password - Route to change user password
+router.post("/change-password", verifyToken, async (req, res) => {
+  const { currentPassword, newPassword, confirmNewPassword } = req.body;
+  const userId = req.user.userId;
+
+  // Validation
+  if (!currentPassword || !newPassword || !confirmNewPassword) {
+    return res.status(400).json({
+      success: false,
+      message: "Current password, new password, and confirmation are required."
+    });
+  }
+
+  if (newPassword !== confirmNewPassword) {
+    return res.status(400).json({
+      success: false,
+      message: "New passwords do not match."
+    });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({
+      success: false,
+      message: "Password must be at least 6 characters long."
+    });
+  }
+
+  try {
+    // Find user
+    const userResult = await db.query(
+      'SELECT * FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found."
+      });
+    }
+
+    // Verify current password
+    const isCorrectPassword = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!isCorrectPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Current password is incorrect."
+      });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(saltRounds);
+    const newPasswordHash = await bcrypt.hash(newPassword, salt);
+
+    // Update user's password
+    await db.query(
+      'UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [newPasswordHash, userId]
+    );
+
+    res.json({
+      success: true,
+      message: "Password changed successfully."
+    });
+  } catch (error) {
+    console.error('Error changing password:', error);
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while changing password."
+    });
+  }
+});
+
 module.exports = router;
