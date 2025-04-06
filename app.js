@@ -10,8 +10,7 @@ const db = require("./db/index");                 // Database connection
 const config = require("./config/index");         // Application configuration
 const { errorHandler, notFoundHandler } = require('./error-handling');
 
-// Initialize environment variables
-dotenv.config();
+// Environment variables are now loaded in server.js
 
 // Create and configure Express application
 const app = express();

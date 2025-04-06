@@ -1,11 +1,11 @@
 const app = require("./app");
 
 // Load environment variables based on NODE_ENV
-if (process.env.NODE_ENV === 'development') {
-    require('dotenv').config({ path: '.env.development' });
-} else {
-    require('dotenv').config(); // Use the regular .env file for production
-}
+require('dotenv').config({ 
+  path: process.env.NODE_ENV === 'development' 
+    ? '.env.development' 
+    : '.env.production'
+});
 
 // ℹ️ Sets the PORT for our app to have access to it. If no env has been set, we hard code it to 3000
 const PORT = process.env.PORT || 3000;
