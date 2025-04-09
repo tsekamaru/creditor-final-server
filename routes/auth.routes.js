@@ -243,7 +243,7 @@ router.get("/validate-token", verifyToken, (req, res) => {
 // POST /auth/change-password - Route to change user password
 router.post("/change-password", verifyToken, async (req, res) => {
   const { currentPassword, newPassword, confirmNewPassword } = req.body;
-  const userId = req.user.userId;
+  const userId = req.user.id;
 
   // Validation
   if (!currentPassword || !newPassword || !confirmNewPassword) {
