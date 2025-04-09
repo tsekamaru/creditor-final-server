@@ -89,14 +89,51 @@ class User {
 
     // Delete user
     static async deleteUser(id) {
+        const client = await db.pool.connect();
         try {
-            const result = await db.query(
+            await client.query('BEGIN'); // Start transaction
+
+            // First check if user exists
+            const userCheck = await client.query('SELECT role FROM users WHERE id = $1', [id]);
+            if (userCheck.rows.length === 0) {
+                throw new Error('User not found');
+            }
+            
+            const userRole = userCheck.rows[0].role;
+            
+            // Delete based on role - each role has its own related table
+            if (userRole === 'customer') {
+                // First check for and delete any related loans/transactions
+                const customerLoans = await client.query('SELECT id FROM loans WHERE customer_id = $1', [id]);
+                
+                // Delete transactions related to each loan
+                for (const loan of customerLoans.rows) {
+                    await client.query('DELETE FROM transactions WHERE loan_id = $1', [loan.id]);
+                }
+                
+                // Delete all loans for this customer
+                await client.query('DELETE FROM loans WHERE customer_id = $1', [id]);
+                
+                // Delete customer record
+                await client.query('DELETE FROM customers WHERE user_id = $1', [id]);
+            } else if (userRole === 'employee') {
+                // Delete employee record
+                await client.query('DELETE FROM employees WHERE user_id = $1', [id]);
+            }
+            
+            // Finally delete the user
+            const result = await client.query(
                 'DELETE FROM users WHERE id = $1 RETURNING id, role, phone_number, email, created_at, updated_at',
                 [id]
             );
+            
+            await client.query('COMMIT'); // Commit transaction
             return result.rows[0];
         } catch (error) {
+            await client.query('ROLLBACK'); // Rollback on error
             throw new Error('Error deleting user: ' + error.message);
+        } finally {
+            client.release(); // Release client back to pool
         }
     }
 
