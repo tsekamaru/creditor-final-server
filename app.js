@@ -34,7 +34,6 @@ const employeeRoutes = require("./routes/employee.routes");
 const customerRoutes = require("./routes/customer.routes");
 const loanRoutes = require("./routes/loan.routes");
 const transactionRoutes = require("./routes/transaction.routes");
-const dashboardRoutes = require("./routes/dashboard.routes");
 
 // ℹ️ Route setup
 app.use("/", index);
@@ -44,7 +43,6 @@ app.use("/api/employees", employeeRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/loans", loanRoutes);
 app.use("/api/transactions", transactionRoutes);
-app.use("/api/dashboard", dashboardRoutes);
 
 // Database connection
 db.connect()
