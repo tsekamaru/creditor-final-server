@@ -4,6 +4,7 @@ const db = require('../db');
 const bcrypt = require('bcrypt');
 const saltRounds = 10;
 const { verifyToken, isAdmin } = require('../middleware/jwtAuth');
+const User = require('../models/User.model');
 
 // GET /api/users - Get all users (Admin only)
 router.get('/', verifyToken, isAdmin, async (req, res, next) => {
@@ -178,12 +179,10 @@ router.put('/:id', verifyToken, async (req, res, next) => {
 // DELETE /api/users/:id - Delete user (Admin only)
 router.delete('/:id', verifyToken, isAdmin, async (req, res, next) => {
     try {
-        const result = await db.query(
-            'DELETE FROM users WHERE id = $1 RETURNING id, role, phone_number, email, created_at, updated_at',
-            [req.params.id]
-        );
-
-        if (result.rows.length === 0) {
+        const userId = req.params.id;
+        const deletedUser = await User.deleteUser(userId);
+        
+        if (!deletedUser) {
             return res.status(404).json({ 
                 success: false,
                 message: 'User not found' 
@@ -193,10 +192,15 @@ router.delete('/:id', verifyToken, isAdmin, async (req, res, next) => {
         res.json({ 
             success: true,
             message: 'User deleted successfully',
-            user: result.rows[0]
+            user: deletedUser
         });
     } catch (error) {
-        next(error);
+        console.error('Error deleting user:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting user',
+            error: error.message
+        });
     }
 });
 
